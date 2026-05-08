@@ -126,8 +126,11 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 			border: 1px solid var(--vscode-input-border);
 			padding: 3px 6px;
 		}
+		.toolbar input[type="range"] {
+			width: 100px;
+		}
 		.filename {
-			margin-left: auto;
+			margin-right: auto;
 			opacity: 0.8;
 			font-size: 0.9em;
 			white-space: nowrap;
@@ -138,15 +141,17 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 		.viewport {
 			flex: 1;
 			overflow: auto;
-			display: grid;
-			place-items: center;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
 			padding: 16px;
+			background: var(--vscode-editor-background);
 		}
 		canvas {
 			box-shadow: 0 8px 30px rgba(0, 0, 0, 0.24);
 			background: white;
 			max-width: 100%;
-			height: auto;
+			margin-bottom: 8px;
 		}
 		.status {
 			padding: 10px 12px;
@@ -158,20 +163,13 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 </head>
 <body>
 	<div class="toolbar">
-		<button id="prev">Prev</button>
-		<button id="next">Next</button>
-		<label for="page">Page</label>
-		<input id="page" type="number" min="1" value="1" />
-		<span id="pageCount">/ 0</span>
-		<button id="zoomOut">-</button>
-		<button id="zoomIn">+</button>
-		<button id="fit">Fit Width</button>
-		<span id="zoomLabel">100%</span>
 		<span id="filename" class="filename"></span>
+		<button id="zoomOut">−</button>
+		<input id="zoom" type="range" min="50" max="200" value="100" />
+		<button id="zoomIn">+</button>
+		<span id="zoomLabel">100%</span>
 	</div>
-	<div class="viewport" id="viewport">
-		<canvas id="canvas"></canvas>
-	</div>
+	<div class="viewport" id="viewport"></div>
 	<div class="status" id="status">Loading...</div>
 
 	<script nonce="${nonce}" type="module">
@@ -181,112 +179,85 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 		pdfjsLib.GlobalWorkerOptions.workerSrc = '${workerUri}';
 
 		const statusEl = document.getElementById('status');
-		const pageInput = document.getElementById('page');
-		const pageCount = document.getElementById('pageCount');
 		const zoomLabel = document.getElementById('zoomLabel');
+		const zoomInput = document.getElementById('zoom');
 		const filenameEl = document.getElementById('filename');
 		const viewportEl = document.getElementById('viewport');
-		const canvas = document.getElementById('canvas');
-		const ctx = canvas.getContext('2d');
 
 		let pdfDoc = null;
-		let pageNum = 1;
 		let zoom = 1.0;
-		let fitMode = false;
-		let renderTask = null;
+		let renderTasks = [];
 
 		const updateStatus = (text) => {
 			statusEl.textContent = text;
 		};
 
-		const updateToolbar = () => {
-			pageInput.value = String(pageNum);
-			pageCount.textContent = pdfDoc ? '/ ' + String(pdfDoc.numPages) : '/ 0';
+		const updateZoomLabel = () => {
 			zoomLabel.textContent = Math.round(zoom * 100) + '%';
+			zoomInput.value = Math.round(zoom * 100);
 		};
 
-		const renderPage = async () => {
-			if (!pdfDoc || !ctx) {
-				return;
-			}
-
-			if (renderTask) {
-				try {
-					renderTask.cancel();
-				} catch {
-					// Ignore cancellation race conditions.
-				}
-			}
-
-			const page = await pdfDoc.getPage(pageNum);
-			let scale = zoom;
-
-			if (fitMode) {
-				const viewportAt1 = page.getViewport({ scale: 1 });
-				const padding = 32;
-				scale = Math.max((viewportEl.clientWidth - padding) / viewportAt1.width, 0.2);
-			}
-
-			const viewport = page.getViewport({ scale });
-			canvas.width = Math.floor(viewport.width);
-			canvas.height = Math.floor(viewport.height);
-
-			renderTask = page.render({ canvasContext: ctx, viewport });
-			await renderTask.promise;
-			renderTask = null;
-
-			updateToolbar();
-			updateStatus('Page ' + pageNum + ' of ' + pdfDoc.numPages);
-		};
-
-		const goToPage = async (targetPage) => {
+		const renderAllPages = async () => {
 			if (!pdfDoc) {
 				return;
 			}
-			const bounded = Math.min(Math.max(targetPage, 1), pdfDoc.numPages);
-			pageNum = bounded;
-			await renderPage();
+
+			updateStatus('Rendering pages...');
+			viewportEl.innerHTML = '';
+			renderTasks = [];
+
+			for (let pageIdx = 1; pageIdx <= pdfDoc.numPages; pageIdx += 1) {
+				const pageDiv = document.createElement('div');
+				pageDiv.style.textAlign = 'center';
+				pageDiv.style.marginBottom = '16px';
+				pageDiv.style.pageBreakAfter = 'always';
+
+				const pageCanvas = document.createElement('canvas');
+				viewportEl.appendChild(pageDiv);
+				pageDiv.appendChild(pageCanvas);
+
+				(async () => {
+					try {
+						const page = await pdfDoc.getPage(pageIdx);
+						const viewport = page.getViewport({ scale: zoom });
+
+						pageCanvas.width = Math.floor(viewport.width);
+						pageCanvas.height = Math.floor(viewport.height);
+
+						const ctx = pageCanvas.getContext('2d');
+						if (!ctx) return;
+
+						const renderTask = page.render({ canvasContext: ctx, viewport });
+						renderTasks.push(renderTask);
+						await renderTask.promise;
+					} catch (error) {
+						console.error('Failed to render page ' + pageIdx + ':', error);
+					}
+				})();
+			}
+
+			// Wait a bit for all renders to complete
+			setTimeout(() => {
+				updateStatus('Done');
+			}, 1000);
 		};
 
-		document.getElementById('prev').addEventListener('click', async () => {
-			fitMode = false;
-			await goToPage(pageNum - 1);
-		});
-
-		document.getElementById('next').addEventListener('click', async () => {
-			fitMode = false;
-			await goToPage(pageNum + 1);
-		});
-
 		document.getElementById('zoomOut').addEventListener('click', async () => {
-			fitMode = false;
 			zoom = Math.max(0.25, zoom - 0.1);
-			await renderPage();
+			updateZoomLabel();
+			await renderAllPages();
 		});
 
 		document.getElementById('zoomIn').addEventListener('click', async () => {
-			fitMode = false;
-			zoom = Math.min(4, zoom + 0.1);
-			await renderPage();
+			zoom = Math.min(3, zoom + 0.1);
+			updateZoomLabel();
+			await renderAllPages();
 		});
 
-		document.getElementById('fit').addEventListener('click', async () => {
-			fitMode = true;
-			await renderPage();
-		});
-
-		pageInput.addEventListener('change', async () => {
-			fitMode = false;
-			const value = Number(pageInput.value);
-			if (Number.isFinite(value)) {
-				await goToPage(Math.round(value));
-			}
-		});
-
-		window.addEventListener('resize', async () => {
-			if (fitMode) {
-				await renderPage();
-			}
+		zoomInput.addEventListener('change', async () => {
+			zoom = Number(zoomInput.value) / 100;
+			updateZoomLabel();
+			await renderAllPages();
 		});
 
 		window.addEventListener('message', async (event) => {
@@ -313,10 +284,9 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 
 				const loadingTask = pdfjsLib.getDocument({ data });
 				pdfDoc = await loadingTask.promise;
-				pageNum = 1;
-				zoom = 1;
-				fitMode = false;
-				await renderPage();
+				zoom = 1.0;
+				updateZoomLabel();
+				await renderAllPages();
 			} catch (error) {
 				const messageText = error instanceof Error ? error.message : String(error);
 				updateStatus('Failed to render PDF: ' + messageText);

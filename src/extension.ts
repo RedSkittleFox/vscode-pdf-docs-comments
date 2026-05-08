@@ -32,21 +32,20 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 		document: PdfDocument,
 		webviewPanel: vscode.WebviewPanel
 	): Promise<void> {
-		const documentDir = vscode.Uri.file(dirname(document.uri.fsPath));
-		const pdfUri = webviewPanel.webview.asWebviewUri(document.uri);
-
 		webviewPanel.webview.options = {
 			enableScripts: true,
-			localResourceRoots: [this.extensionContext.extensionUri, documentDir]
+			localResourceRoots: [this.extensionContext.extensionUri]
 		};
 
 		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
 		const postDocument = async () => {
 			try {
+				const data = await vscode.workspace.fs.readFile(document.uri);
+				const base64 = Buffer.from(data).toString('base64');
 				await webviewPanel.webview.postMessage({
 					type: 'loadPdf',
-					pdfUri: pdfUri.toString(),
+					base64,
 					fileName: getFileName(document.uri)
 				});
 			} catch (error) {
@@ -298,7 +297,7 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 				return;
 			}
 
-			if (message.type !== 'loadPdf' || !message.pdfUri) {
+			if (message.type !== 'loadPdf' || !message.base64) {
 				return;
 			}
 
@@ -306,7 +305,13 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 				updateStatus('Opening PDF...');
 				filenameEl.textContent = message.fileName || '';
 
-				const loadingTask = pdfjsLib.getDocument(message.pdfUri);
+				const binary = atob(message.base64);
+				const data = new Uint8Array(binary.length);
+				for (let i = 0; i < binary.length; i += 1) {
+					data[i] = binary.charCodeAt(i);
+				}
+
+				const loadingTask = pdfjsLib.getDocument({ data });
 				pdfDoc = await loadingTask.promise;
 				pageNum = 1;
 				zoom = 1;

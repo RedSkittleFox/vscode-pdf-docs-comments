@@ -4,18 +4,26 @@
   "description": "A PDF viewer for VS Code with linkable document sections",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.118.0"
+    "vscode": "^1.115.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
-    "commands": [
+    "customEditors": [
       {
-        "command": "vscode-pdf-docs.helloWorld",
-        "title": "Hello World"
+        "viewType": "vscode-pdf-docs.pdfPreview",
+        "displayName": "PDF Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.pdf"
+          }
+        ],
+        "priority": "default"
       }
     ]
   },
@@ -26,6 +34,9 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.3.136"
   },
   "devDependencies": {
     "@types/vscode": "^1.118.0",

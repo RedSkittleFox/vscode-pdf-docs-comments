@@ -151,15 +151,14 @@ html, body { margin: 0; width: 100%; height: 100%; background: var(--vscode-edit
 #viewport {
 width: 100%; height: 100%;
 overflow: auto;
-display: flex;
-flex-direction: column;
-align-items: center;
 padding: 16px;
 }
 #pages {
 display: flex;
 flex-direction: column;
 align-items: center;
+width: max-content;
+margin: 0 auto;
 gap: 16px;
 
 }
@@ -505,8 +504,8 @@ const slot = pagesEl.children[i];
 const baseSize = pageSizeScale1ByIndex.get(i);
 const baseWidth = baseSize?.width ?? estimatedPageWidthAtScale1;
 const baseHeight = baseSize?.height ?? estimatedPageHeightAtScale1;
-slot.style.width = Math.max(1, Math.floor(baseWidth * scale)) + 'px';
-slot.style.height = Math.max(1, Math.floor(baseHeight * scale)) + 'px';
+slot.style.width = Math.max(1, baseWidth * scale) + 'px';
+slot.style.height = Math.max(1, baseHeight * scale) + 'px';
 }
 }
 
@@ -772,6 +771,13 @@ syncPageContentScaleCompensation();
 }
 
 commitRenderedPages(renderedEntries, targetZoom);
+} else if (transitionCommit) {
+// Important: even without freshly rendered pages, advance committed zoom state.
+// Otherwise the viewer can stay in a stale renderedAtZoom and skip HQ rerenders.
+renderedAtZoom = targetZoom;
+pagesEl.style.gap = (16 * renderedAtZoom) + 'px';
+applyLayoutForScale(renderedAtZoom);
+syncPageContentScaleCompensation();
 }
 
 restoreSelectionState(selectionState);
@@ -782,7 +788,6 @@ async function rerenderAtCurrentZoom() {
 if (!pdfDoc) { return; }
 const targetZoom = zoom;
 const gen = ++renderGeneration;
-const fromRenderedZoom = renderedAtZoom;
 const anchorSnapshot = pendingZoomAnchor
 ? {
 mouseX: pendingZoomAnchor.mouseX,
@@ -798,30 +803,16 @@ clearTimeout(visibleRenderTimer);
 visibleRenderTimer = null;
 }
 
-const anchorX = viewportEl.clientWidth / 2;
-const anchorY = viewportEl.clientHeight / 2;
-const oldScrollWidth = Math.max(1, viewportEl.scrollWidth);
-const oldScrollHeight = Math.max(1, viewportEl.scrollHeight);
-const docX = viewportEl.scrollLeft + anchorX;
-const docY = viewportEl.scrollTop + anchorY;
-
 await renderVisiblePages(targetZoom, gen, true);
 if (gen !== renderGeneration) { return; }
 
 if (anchorSnapshot) {
-const committedFromZoom = Math.max(0.0001, anchorSnapshot.fromRenderedZoom ?? fromRenderedZoom);
-const commitRatio = targetZoom / committedFromZoom;
-const newDocX = anchorSnapshot.docBaseX * commitRatio;
-const newDocY = anchorSnapshot.docBaseY * commitRatio;
-viewportEl.scrollLeft = Math.max(0, newDocX - anchorSnapshot.mouseX);
-viewportEl.scrollTop = Math.max(0, newDocY - anchorSnapshot.mouseY);
 pendingZoomAnchor = null;
-} else {
-const newScrollWidth = Math.max(1, viewportEl.scrollWidth);
-const newScrollHeight = Math.max(1, viewportEl.scrollHeight);
-viewportEl.scrollLeft = docX * (newScrollWidth / oldScrollWidth) - anchorX;
-viewportEl.scrollTop = docY * (newScrollHeight / oldScrollHeight) - anchorY;
 }
+
+// Let the committed layout settle for one frame before removing preview transform.
+await new Promise((resolve) => requestAnimationFrame(resolve));
+if (gen !== renderGeneration) { return; }
 
 if (previewScaleRaf !== null) {
 cancelAnimationFrame(previewScaleRaf);
@@ -830,6 +821,9 @@ previewScaleRaf = null;
 previewScaleCurrent = 1.0;
 previewScaleTarget = 1.0;
 applyPreviewScaleTransform(1.0);
+
+// Ensure visible pages are refreshed at committed scale even without user scroll.
+scheduleVisibleRender();
 }
 
 function scheduleRerender() {

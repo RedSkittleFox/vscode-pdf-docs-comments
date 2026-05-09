@@ -674,6 +674,14 @@ function getTotalPages() {
 return pdfDoc?.numPages ?? 0;
 }
 
+function updateStatus() {
+if (!pdfDoc) { return; }
+const current = Math.max(1, Math.min(getCurrentPageNumber(), getTotalPages()));
+const total = Math.max(1, getTotalPages());
+const zoomPercent = Math.round(zoom * 100);
+statusEl.textContent = current + '/' + total + ' ' + zoomPercent + '%';
+}
+
 function goToPage(pageNumber) {
 if (!pdfDoc) { return; }
 const target = Math.max(1, Math.min(pageNumber, pdfDoc.numPages));
@@ -684,7 +692,7 @@ const viewportRect = viewportEl.getBoundingClientRect();
 const slotRect = slot.getBoundingClientRect();
 const nextScrollTop = viewportEl.scrollTop + (slotRect.top - viewportRect.top) - 8;
 viewportEl.scrollTop = Math.max(0, nextScrollTop);
-statusEl.textContent = 'Page ' + target + '/' + pdfDoc.numPages + ' - ' + Math.round(zoom * 100) + '%';
+updateStatus();
 scheduleVisibleRender();
 }
 
@@ -743,7 +751,7 @@ const vp = page.getViewport({ scale: Math.max(0.0001, scale) });
 const point = vp.convertToViewportPoint(0, topPdf);
 const targetScrollTop = slot.offsetTop + point[1] - 8;
 viewportEl.scrollTop = Math.max(0, targetScrollTop);
-statusEl.textContent = 'Page ' + pageNumber + '/' + pdfDoc.numPages + ' - ' + Math.round(zoom * 100) + '%';
+updateStatus();
 scheduleVisibleRender();
 }
 
@@ -1217,7 +1225,7 @@ syncPageContentScaleCompensation();
 }
 
 restoreSelectionState(selectionState);
-statusEl.textContent = Math.round(zoom * 100) + '%';
+updateStatus();
 }
 
 async function rerenderAtCurrentZoom() {
@@ -1323,7 +1331,7 @@ fromRenderedZoom: renderedAtZoom
 };
 
 syncPreviewScaleTarget();
-statusEl.textContent = Math.round(zoom * 100) + '%';
+updateStatus();
 scheduleRerender();
 }
 
@@ -1335,6 +1343,7 @@ applyZoom(zoom * factor, e.clientX, e.clientY);
 }, { passive: false });
 
 viewportEl.addEventListener('scroll', () => {
+updateStatus();
 scheduleVisibleRender();
 });
 
@@ -1393,6 +1402,7 @@ if (pdfDoc.numPages >= LARGE_PDF_PAGE_COUNT) {
 statusEl.textContent = 'Opening large PDF (' + pdfDoc.numPages + ' pages)...';
 }
 await rerenderAtCurrentZoom();
+updateStatus();
 } catch (e) {
 statusEl.textContent = 'Failed: ' + (e instanceof Error ? e.message : String(e));
 }

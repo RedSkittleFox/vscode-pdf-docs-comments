@@ -134,7 +134,24 @@ let renderGeneration = 0;
 
 // --- rendering ---
 
-async function renderAllPages(targetZoom) {
+function getFirstVisiblePageIndex() {
+const canvases = pagesEl.querySelectorAll('canvas');
+if (canvases.length === 0) { return 0; }
+const viewportTop = viewportEl.scrollTop;
+const viewportBottom = viewportTop + viewportEl.clientHeight;
+let best = 0;
+let bestVisible = -1;
+for (let i = 0; i < canvases.length; i++) {
+const el = canvases[i];
+const top = el.offsetTop + pagesEl.offsetTop;
+const bottom = top + el.offsetHeight;
+const visible = Math.max(0, Math.min(bottom, viewportBottom) - Math.max(top, viewportTop));
+if (visible > bestVisible) { bestVisible = visible; best = i; }
+}
+return best;
+}
+
+async function renderAllPages(targetZoom, startIndex) {
 if (!pdfDoc) { return; }
 const gen = ++renderGeneration;
 statusEl.textContent = 'Rendering...';
@@ -143,7 +160,6 @@ const next = document.createDocumentFragment();
 const canvases = [];
 
 for (let i = 1; i <= pdfDoc.numPages; i++) {
-if (gen !== renderGeneration) { return; }
 const canvas = document.createElement('canvas');
 canvases.push({ canvas, pageNum: i });
 next.appendChild(canvas);
@@ -155,8 +171,23 @@ renderedAtZoom = targetZoom;
 pagesEl.style.zoom = '1';
 pagesEl.style.gap = (16 * targetZoom) + 'px';
 
-for (const { canvas, pageNum } of canvases) {
+// build render order: start from visible page, then outward
+const first = startIndex !== undefined ? startIndex : 0;
+const order = [];
+for (let offset = 0; offset < canvases.length; offset++) {
+const fwd = first + offset;
+const bwd = first - offset;
+if (offset === 0) {
+order.push(first);
+} else {
+if (fwd < canvases.length) { order.push(fwd); }
+if (bwd >= 0) { order.push(bwd); }
+}
+}
+
+for (const idx of order) {
 if (gen !== renderGeneration) { return; }
+const { canvas, pageNum } = canvases[idx];
 try {
 const page = await pdfDoc.getPage(pageNum);
 const vp = page.getViewport({ scale: targetZoom });
@@ -166,13 +197,17 @@ const ctx = canvas.getContext('2d');
 if (!ctx) { continue; }
 await page.render({ canvasContext: ctx, viewport: vp }).promise;
 if (gen !== renderGeneration) { return; }
+// after first page rendered, restore zoom so visible content appears sharp
+if (idx === first) {
+const cssZoom = zoom / renderedAtZoom;
+pagesEl.style.zoom = String(cssZoom);
+}
 } catch (e) {
 console.error('render page', pageNum, e);
 }
 }
 
 if (gen === renderGeneration) {
-// restore css zoom so visible scale stays correct
 const cssZoom = zoom / renderedAtZoom;
 pagesEl.style.zoom = String(cssZoom);
 statusEl.textContent = Math.round(zoom * 100) + '%';
@@ -183,7 +218,8 @@ function scheduleRerender() {
 if (rerenderTimer) { clearTimeout(rerenderTimer); }
 rerenderTimer = setTimeout(() => {
 rerenderTimer = null;
-renderAllPages(zoom);
+const startIdx = getFirstVisiblePageIndex();
+renderAllPages(zoom, startIdx);
 }, RERENDER_DELAY_MS);
 }
 
@@ -239,7 +275,7 @@ pdfDoc = await pdfjsLib.getDocument({ data }).promise;
 zoom = 1.0;
 renderedAtZoom = 1.0;
 pagesEl.style.zoom = '1';
-await renderAllPages(zoom);
+await renderAllPages(zoom, 0);
 } catch (e) {
 statusEl.textContent = 'Failed: ' + (e instanceof Error ? e.message : String(e));
 }

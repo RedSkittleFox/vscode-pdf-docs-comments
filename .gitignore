@@ -4,3 +4,4 @@ node_modules
 .vscode-test/
 *.vsix
 test-workspace/big-pdf.pdf
+test-workspace/docs/big-pdf.pdf

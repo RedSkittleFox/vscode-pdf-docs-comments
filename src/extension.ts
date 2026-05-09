@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
+import * as path from 'node:path';
 import * as pdfjsModule from 'pdfjs-dist';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -62,6 +63,49 @@ const revealOutlinePageCommand = vscode.commands.registerCommand(
 	}
 );
 
+const copyOutlineSectionNameCommand = vscode.commands.registerCommand(
+	'vscode-pdf-docs.copyOutlineSectionName',
+	async (item: PdfOutlineTreeItem | undefined) => {
+		if (!item) {
+			return;
+		}
+		await vscode.env.clipboard.writeText(item.node.title);
+	}
+);
+
+const copyOutlineFullPathCommand = vscode.commands.registerCommand(
+	'vscode-pdf-docs.copyOutlineFullPath',
+	async (item: PdfOutlineTreeItem | undefined) => {
+		if (!item) {
+			return;
+		}
+		await vscode.env.clipboard.writeText(item.node.fullPath);
+	}
+);
+
+const copyOutlineSectionPathCommand = vscode.commands.registerCommand(
+	'vscode-pdf-docs.copyOutlineSectionPath',
+	async (item: PdfOutlineTreeItem | undefined) => {
+		if (!item) {
+			return;
+		}
+		const relativePath = toWorkspaceRelativePdfPath(vscode.Uri.file(item.node.pdfAbsolutePath));
+		const reference = `@pdf(${relativePath}#outline=${item.node.fullPath})`;
+		await vscode.env.clipboard.writeText(reference);
+	}
+);
+
+const copyOutlineFullSectionPathCommand = vscode.commands.registerCommand(
+	'vscode-pdf-docs.copyOutlineFullSectionPath',
+	async (item: PdfOutlineTreeItem | undefined) => {
+		if (!item) {
+			return;
+		}
+		const reference = `@pdf(${item.node.pdfAbsolutePath}#outline=${item.node.fullPath})`;
+		await vscode.env.clipboard.writeText(reference);
+	}
+);
+
 const refreshOutlineCommand = vscode.commands.registerCommand('vscode-pdf-docs.refreshOutline', () => {
 	outlineTreeProvider.refresh();
 });
@@ -70,24 +114,226 @@ const tabChangeSubscription = vscode.window.tabGroups.onDidChangeTabs(() => {
 	outlineTreeProvider.refresh();
 });
 
+const openPdfCommentReferenceCommand = vscode.commands.registerCommand(
+	'vscode-pdf-docs.openPdfCommentReference',
+	async (payload: PdfCommentReferencePayload | undefined) => {
+		if (!payload) {
+			return;
+		}
+
+		const sourceUri = vscode.Uri.parse(payload.sourceUri);
+		const targetPdfUri = await resolvePdfReferenceUri(payload.pdfPath, sourceUri);
+		if (!targetPdfUri) {
+			void vscode.window.showWarningMessage(`Referenced PDF not found: ${payload.pdfPath}`);
+			return;
+		}
+
+		let pageNumber = payload.pageNumber;
+		if (!pageNumber && payload.outlineTitle) {
+			const entries = await extractPdfOutlineEntries(targetPdfUri);
+			const matched = findOutlineEntryByTitle(entries, payload.outlineTitle);
+			if (matched) {
+				pageNumber = matched.pageNumber;
+			}
+		}
+
+		await provider.openDocumentAtPage(targetPdfUri, pageNumber ?? 1);
+	}
+);
+
+const commentReferenceLinkProvider = new PdfCommentReferenceLinkProvider();
+const commentReferenceRegistration = vscode.languages.registerDocumentLinkProvider(
+	{ scheme: 'file' },
+	commentReferenceLinkProvider
+);
+
 context.subscriptions.push(providerRegistration);
 context.subscriptions.push(goToPageCommand);
 context.subscriptions.push(showOutlineCommand);
 context.subscriptions.push(outlineTreeRegistration);
 context.subscriptions.push(revealOutlinePageCommand);
+context.subscriptions.push(copyOutlineSectionNameCommand);
+context.subscriptions.push(copyOutlineFullPathCommand);
+context.subscriptions.push(copyOutlineSectionPathCommand);
+context.subscriptions.push(copyOutlineFullSectionPathCommand);
 context.subscriptions.push(refreshOutlineCommand);
 context.subscriptions.push(tabChangeSubscription);
+context.subscriptions.push(openPdfCommentReferenceCommand);
+context.subscriptions.push(commentReferenceRegistration);
 }
 
 export function deactivate() {}
 
 type PdfOutlineEntry = {
+	title: string;
+	fullPath: string;
 	label: string;
 	pageNumber: number;
 };
 
+type PdfCommentReferencePayload = {
+	pdfPath: string;
+	pageNumber?: number;
+	outlineTitle?: string;
+	sourceUri: string;
+};
+
+type ParsedPdfReference = {
+	pdfPath: string;
+	pageNumber?: number;
+	outlineTitle?: string;
+};
+
+class PdfCommentReferenceLinkProvider implements vscode.DocumentLinkProvider {
+	public provideDocumentLinks(document: vscode.TextDocument): vscode.DocumentLink[] {
+		const text = document.getText();
+		const links: vscode.DocumentLink[] = [];
+		const regex = /@pdf\(([^)\n]+)\)/g;
+		let match: RegExpExecArray | null;
+
+		while ((match = regex.exec(text)) !== null) {
+			const spec = match[1]?.trim();
+			if (!spec) {
+				continue;
+			}
+
+			const parsed = parsePdfReferenceSpec(spec);
+			if (!parsed) {
+				continue;
+			}
+
+			const fullMatch = match[0];
+			const specStartInMatch = fullMatch.indexOf(spec);
+			const startOffset = match.index + Math.max(0, specStartInMatch);
+			const endOffset = startOffset + spec.length;
+			const range = new vscode.Range(document.positionAt(startOffset), document.positionAt(endOffset));
+
+			const payload: PdfCommentReferencePayload = {
+				pdfPath: parsed.pdfPath,
+				pageNumber: parsed.pageNumber,
+				outlineTitle: parsed.outlineTitle,
+				sourceUri: document.uri.toString()
+			};
+
+			const target = vscode.Uri.parse(
+				`command:vscode-pdf-docs.openPdfCommentReference?${encodeURIComponent(JSON.stringify([payload]))}`
+			);
+			const link = new vscode.DocumentLink(range, target);
+			link.tooltip = parsed.pageNumber
+				? `Open ${parsed.pdfPath} page ${parsed.pageNumber}`
+				: parsed.outlineTitle
+					? `Open ${parsed.pdfPath} outline ${parsed.outlineTitle}`
+					: `Open ${parsed.pdfPath}`;
+			links.push(link);
+		}
+
+		return links;
+	}
+}
+
+function parsePdfReferenceSpec(specRaw: string): ParsedPdfReference | undefined {
+	const spec = specRaw.trim();
+	if (!spec) {
+		return undefined;
+	}
+
+	const hashIndex = spec.indexOf('#');
+	const pdfPath = (hashIndex >= 0 ? spec.slice(0, hashIndex) : spec).trim();
+	if (!pdfPath.toLowerCase().endsWith('.pdf')) {
+		return undefined;
+	}
+
+	const fragmentRaw = hashIndex >= 0 ? spec.slice(hashIndex + 1).trim() : '';
+	if (!fragmentRaw) {
+		return { pdfPath };
+	}
+
+	const fragment = decodeURIComponent(fragmentRaw);
+	const pageMatch = fragment.match(/^(?:page=|p=)?(\d+)$/i);
+	if (pageMatch) {
+		const pageNumber = Number(pageMatch[1]);
+		if (Number.isFinite(pageNumber) && pageNumber > 0) {
+			return { pdfPath, pageNumber };
+		}
+		return { pdfPath };
+	}
+
+	const outlineMatch = fragment.match(/^outline=(.+)$/i);
+	if (outlineMatch && outlineMatch[1].trim()) {
+		return { pdfPath, outlineTitle: outlineMatch[1].trim() };
+	}
+
+	if (fragment.trim()) {
+		return { pdfPath, outlineTitle: fragment.trim() };
+	}
+
+	return { pdfPath };
+}
+
+async function resolvePdfReferenceUri(pdfPath: string, sourceUri: vscode.Uri): Promise<vscode.Uri | undefined> {
+	const trimmed = pdfPath.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+
+	const candidates: vscode.Uri[] = [];
+	if (path.isAbsolute(trimmed)) {
+		candidates.push(vscode.Uri.file(trimmed));
+	} else {
+		const sourceDir = path.dirname(sourceUri.fsPath);
+		candidates.push(vscode.Uri.file(path.resolve(sourceDir, trimmed)));
+		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			candidates.push(vscode.Uri.file(path.resolve(folder.uri.fsPath, trimmed)));
+		}
+	}
+
+	for (const candidate of candidates) {
+		try {
+			const stat = await vscode.workspace.fs.stat(candidate);
+			if (stat.type === vscode.FileType.File) {
+				return candidate;
+			}
+		} catch {
+			// Try next candidate.
+		}
+	}
+
+	return undefined;
+}
+
+function findOutlineEntryByTitle(entries: PdfOutlineEntry[], title: string): PdfOutlineEntry | undefined {
+	const normalize = (value: string) => value.trim().toLowerCase().replace(/\s*>\s*/g, ' > ');
+	const target = normalize(title);
+	if (!target) {
+		return undefined;
+	}
+
+	const exact = entries.find((entry) => normalize(entry.title) === target || normalize(entry.fullPath) === target);
+	if (exact) {
+		return exact;
+	}
+
+	return entries.find((entry) => {
+		const titleNorm = normalize(entry.title);
+		const pathNorm = normalize(entry.fullPath);
+		return titleNorm.includes(target) || pathNorm.includes(target);
+	});
+}
+
+function toWorkspaceRelativePdfPath(uri: vscode.Uri): string {
+	const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+	if (!workspaceFolder) {
+		return uri.fsPath;
+	}
+	const relative = path.relative(workspaceFolder.uri.fsPath, uri.fsPath);
+	return relative || path.basename(uri.fsPath);
+}
+
 type PdfOutlineNode = {
 	title: string;
+	indentedTitle: string;
+	fullPath: string;
+	pdfAbsolutePath: string;
 	pageNumber: number;
 	children: PdfOutlineNode[];
 };
@@ -102,6 +348,7 @@ class PdfOutlineTreeItem extends vscode.TreeItem {
 		);
 		this.description = `Page ${node.pageNumber}`;
 		this.tooltip = `${node.title} (Page ${node.pageNumber})`;
+		this.contextValue = 'pdfOutlineItem';
 		this.command = {
 			command: 'vscode-pdf-docs.revealOutlinePage',
 			title: 'Go to outline page',
@@ -201,26 +448,30 @@ async function extractPdfOutlineEntries(uri: vscode.Uri): Promise<PdfOutlineEntr
 
 	const entries: PdfOutlineEntry[] = [];
 
-	const collect = async (items: any[], level: number): Promise<void> => {
+	const collect = async (items: any[], level: number, parentPath: string): Promise<void> => {
 		for (const item of items) {
 			if (!item || typeof item.title !== 'string' || !item.title.trim()) {
 				continue;
 			}
 
 			const pageNumber = (await resolvePageNumber(item.dest)) ?? 1;
+			const title = item.title.trim();
+			const fullPath = parentPath ? `${parentPath} > ${title}` : title;
 			const prefix = '  '.repeat(Math.min(level, 6));
 			entries.push({
-				label: `${prefix}${item.title.trim()}`,
+				title,
+				fullPath,
+				label: `${prefix}${title}`,
 				pageNumber
 			});
 
 			if (Array.isArray(item.items) && item.items.length > 0) {
-				await collect(item.items, level + 1);
+				await collect(item.items, level + 1, fullPath);
 			}
 		}
 	};
 
-	await collect(outline, 0);
+	await collect(outline, 0, '');
 	return entries;
 }
 
@@ -268,19 +519,25 @@ async function extractPdfOutlineTree(uri: vscode.Uri): Promise<PdfOutlineNode[]>
 		return undefined;
 	};
 
-	const mapNodes = async (items: any[]): Promise<PdfOutlineNode[]> => {
+	const mapNodes = async (items: any[], level: number, parentPath: string): Promise<PdfOutlineNode[]> => {
 		const out: PdfOutlineNode[] = [];
 		for (const item of items) {
 			if (!item || typeof item.title !== 'string' || !item.title.trim()) {
 				continue;
 			}
 
+			const title = item.title.trim();
+			const fullPath = parentPath ? `${parentPath} > ${title}` : title;
+			const indent = '  '.repeat(Math.min(level, 8));
 			const children = Array.isArray(item.items) && item.items.length > 0
-				? await mapNodes(item.items)
+				? await mapNodes(item.items, level + 1, fullPath)
 				: [];
 
 			out.push({
-				title: item.title.trim(),
+				title,
+				indentedTitle: `${indent}${title}`,
+				fullPath,
+				pdfAbsolutePath: uri.fsPath,
 				pageNumber: (await resolvePageNumber(item.dest)) ?? 1,
 				children
 			});
@@ -288,7 +545,7 @@ async function extractPdfOutlineTree(uri: vscode.Uri): Promise<PdfOutlineNode[]>
 		return out;
 	};
 
-	return mapNodes(outline);
+	return mapNodes(outline, 0, '');
 }
 
 class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<PdfDocument> {
@@ -296,6 +553,7 @@ constructor(private readonly extensionContext: vscode.ExtensionContext) {}
 
 	private activePanel: vscode.WebviewPanel | undefined;
 	private readonly panelDocumentByPanel = new Map<vscode.WebviewPanel, vscode.Uri>();
+	private readonly pendingPageByDocumentKey = new Map<string, number>();
 
 public async openCustomDocument(uri: vscode.Uri): Promise<PdfDocument> {
 return PdfDocument.create(uri);
@@ -328,10 +586,16 @@ if (event?.type === 'ready') {
 try {
 const data = await vscode.workspace.fs.readFile(document.uri);
 const base64 = Buffer.from(data).toString('base64');
+const key = document.uri.toString();
+const initialPage = this.pendingPageByDocumentKey.get(key);
+if (initialPage !== undefined) {
+	this.pendingPageByDocumentKey.delete(key);
+}
 await webviewPanel.webview.postMessage({
 type: 'loadPdf',
 base64,
-fileName: document.uri.path.split('/').pop() ?? ''
+fileName: document.uri.path.split('/').pop() ?? '',
+initialPage
 });
 } catch (error) {
 const message = error instanceof Error ? error.message : String(error);
@@ -412,6 +676,29 @@ public getActiveDocumentUri(): vscode.Uri | undefined {
 		return undefined;
 	}
 	return this.panelDocumentByPanel.get(this.activePanel);
+}
+
+private getPanelForDocument(uri: vscode.Uri): vscode.WebviewPanel | undefined {
+	for (const [panel, panelUri] of this.panelDocumentByPanel) {
+		if (panelUri.toString() === uri.toString()) {
+			return panel;
+		}
+	}
+	return undefined;
+}
+
+public async openDocumentAtPage(uri: vscode.Uri, page: number): Promise<void> {
+	const targetPage = Math.max(1, Math.floor(page));
+	const existing = this.getPanelForDocument(uri);
+	if (existing) {
+		this.activePanel = existing;
+		existing.reveal(existing.viewColumn, false);
+		await existing.webview.postMessage({ type: 'goToPage', page: targetPage });
+		return;
+	}
+
+	this.pendingPageByDocumentKey.set(uri.toString(), targetPage);
+	await vscode.commands.executeCommand('vscode.openWith', uri, 'vscode-pdf-docs.pdfPreview');
 }
 
 public async goToPageInActiveEditor(page: number): Promise<boolean> {
@@ -1402,6 +1689,10 @@ if (pdfDoc.numPages >= LARGE_PDF_PAGE_COUNT) {
 statusEl.textContent = 'Opening large PDF (' + pdfDoc.numPages + ' pages)...';
 }
 await rerenderAtCurrentZoom();
+const initialPage = Number(msg.initialPage ?? 0);
+if (Number.isFinite(initialPage) && initialPage > 0) {
+	goToPage(initialPage);
+}
 updateStatus();
 } catch (e) {
 statusEl.textContent = 'Failed: ' + (e instanceof Error ? e.message : String(e));

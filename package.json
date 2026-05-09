@@ -39,8 +39,52 @@
       {
         "command": "vscode-pdf-docs.revealOutlinePage",
         "title": "PDF: Reveal Outline Page"
+      },
+      {
+        "command": "vscode-pdf-docs.openPdfCommentReference",
+        "title": "PDF: Open Comment Reference"
+      },
+      {
+        "command": "vscode-pdf-docs.copyOutlineSectionName",
+        "title": "Copy Section Name"
+      },
+      {
+        "command": "vscode-pdf-docs.copyOutlineFullPath",
+        "title": "Copy Full Section Name"
+      },
+      {
+        "command": "vscode-pdf-docs.copyOutlineSectionPath",
+        "title": "Copy Section Path"
+      },
+      {
+        "command": "vscode-pdf-docs.copyOutlineFullSectionPath",
+        "title": "Copy Full Section Path"
       }
     ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "vscode-pdf-docs.copyOutlineSectionName",
+          "when": "view == pdfOutlineExplorer && viewItem == pdfOutlineItem",
+          "group": "copy@1"
+        },
+        {
+          "command": "vscode-pdf-docs.copyOutlineFullPath",
+          "when": "view == pdfOutlineExplorer && viewItem == pdfOutlineItem",
+          "group": "copy@2"
+        },
+        {
+          "command": "vscode-pdf-docs.copyOutlineSectionPath",
+          "when": "view == pdfOutlineExplorer && viewItem == pdfOutlineItem",
+          "group": "copy@3"
+        },
+        {
+          "command": "vscode-pdf-docs.copyOutlineFullSectionPath",
+          "when": "view == pdfOutlineExplorer && viewItem == pdfOutlineItem",
+          "group": "copy@4"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "vscode-pdf-docs.goToPage",

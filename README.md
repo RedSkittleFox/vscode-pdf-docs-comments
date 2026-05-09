@@ -1,10 +1,10 @@
-# vscode-pdf-docs
+# vscode-pdf-docs-comments
 
 PDF reading and referencing extension for VS Code.
 
 It adds a custom PDF preview with smooth zoom, navigation, dark-mode reading, outline tools, and comment references from source code to PDF pages/sections.
 
-![vscode-pdf-docs presentation](resources/readme-presentation.gif)
+![vscode-pdf-docs-comments presentation](resources/readme-presentation.gif)
 
 ## Features
 

@@ -1,7 +1,7 @@
 {
   "name": "vscode-pdf-docs-comments",
   "publisher": "RedSkittleFox",
-  "displayName": "vscode-pdf-docs",
+  "displayName": "vscode-pdf-docs-comments",
   "description": "A PDF viewer for VS Code with linkable document sections",
   "version": "1.0.0",
   "engines": {
@@ -17,11 +17,11 @@
   "icon": "resources/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/RedSkittleFox/vscode-pdf-docs.git"
+    "url": "https://github.com/RedSkittleFox/vscode-pdf-docs-comments.git"
   },
-  "homepage": "https://github.com/RedSkittleFox/vscode-pdf-docs#readme",
+  "homepage": "https://github.com/RedSkittleFox/vscode-pdf-docs-comments#readme",
   "bugs": {
-    "url": "https://github.com/RedSkittleFox/vscode-pdf-docs/issues"
+    "url": "https://github.com/RedSkittleFox/vscode-pdf-docs-comments/issues"
   },
   "contributes": {
     "configuration": {

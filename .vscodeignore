@@ -1,7 +1,13 @@
+.devcontainer/**
+.github/**
 .vscode/**
 .vscode-test/**
 src/**
+test-workspace/**
+src/test/**
 .gitignore
+.vscodeignore
+package-lock.json
 .yarnrc
 vsc-extension-quickstart.md
 **/tsconfig.json

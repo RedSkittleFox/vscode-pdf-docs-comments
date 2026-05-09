@@ -14,6 +14,26 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "VSCode PDF Docs",
+      "properties": {
+        "vscode-pdf-docs.darkMode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "on",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "Always use light PDF rendering.",
+            "Always use dark PDF rendering.",
+            "Follow the active VS Code color theme."
+          ],
+          "default": "auto",
+          "description": "Controls PDF reading dark mode for the custom PDF preview."
+        }
+      }
+    },
     "views": {
       "explorer": [
         {
@@ -31,6 +51,10 @@
       {
         "command": "vscode-pdf-docs.showOutline",
         "title": "PDF: Show Outline"
+      },
+      {
+        "command": "vscode-pdf-docs.toggleDarkMode",
+        "title": "PDF: Toggle Dark Mode"
       },
       {
         "command": "vscode-pdf-docs.refreshOutline",

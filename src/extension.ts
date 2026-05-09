@@ -3,6 +3,9 @@ import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import * as pdfjsModule from 'pdfjs-dist';
 
+type PdfDarkModePreference = 'off' | 'on' | 'auto';
+const DARK_MODE_SETTING_KEY = 'darkMode';
+
 export function activate(context: vscode.ExtensionContext) {
 const provider = new PdfReadonlyEditorProvider(context);
 const providerRegistration = vscode.window.registerCustomEditorProvider(
@@ -19,6 +22,13 @@ const goToPageCommand = vscode.commands.registerCommand('vscode-pdf-docs.goToPag
 	if (!handled) {
 		void vscode.window.showInformationMessage('Open a PDF preview tab to use Go to Page.');
 	}
+});
+
+const toggleDarkModeCommand = vscode.commands.registerCommand('vscode-pdf-docs.toggleDarkMode', async () => {
+	const configuration = vscode.workspace.getConfiguration('vscode-pdf-docs');
+	const current = getDarkModePreference(configuration);
+	const next: PdfDarkModePreference = current === 'on' ? 'off' : 'on';
+	await configuration.update(DARK_MODE_SETTING_KEY, next, vscode.ConfigurationTarget.Global);
 });
 
 const showOutlineCommand = vscode.commands.registerCommand('vscode-pdf-docs.showOutline', async () => {
@@ -114,6 +124,17 @@ const tabChangeSubscription = vscode.window.tabGroups.onDidChangeTabs(() => {
 	outlineTreeProvider.refresh();
 });
 
+const darkModeConfigSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
+	if (!event.affectsConfiguration(`vscode-pdf-docs.${DARK_MODE_SETTING_KEY}`)) {
+		return;
+	}
+	void provider.refreshDarkModeForPanels();
+});
+
+const colorThemeSubscription = vscode.window.onDidChangeActiveColorTheme(() => {
+	void provider.refreshDarkModeForPanels();
+});
+
 const openPdfCommentReferenceCommand = vscode.commands.registerCommand(
 	'vscode-pdf-docs.openPdfCommentReference',
 	async (payload: PdfCommentReferencePayload | undefined) => {
@@ -149,6 +170,7 @@ const commentReferenceRegistration = vscode.languages.registerDocumentLinkProvid
 
 context.subscriptions.push(providerRegistration);
 context.subscriptions.push(goToPageCommand);
+context.subscriptions.push(toggleDarkModeCommand);
 context.subscriptions.push(showOutlineCommand);
 context.subscriptions.push(outlineTreeRegistration);
 context.subscriptions.push(revealOutlinePageCommand);
@@ -158,11 +180,21 @@ context.subscriptions.push(copyOutlineSectionPathCommand);
 context.subscriptions.push(copyOutlineFullSectionPathCommand);
 context.subscriptions.push(refreshOutlineCommand);
 context.subscriptions.push(tabChangeSubscription);
+context.subscriptions.push(darkModeConfigSubscription);
+context.subscriptions.push(colorThemeSubscription);
 context.subscriptions.push(openPdfCommentReferenceCommand);
 context.subscriptions.push(commentReferenceRegistration);
 }
 
 export function deactivate() {}
+
+function getDarkModePreference(configuration: vscode.WorkspaceConfiguration): PdfDarkModePreference {
+	const raw = configuration.get<string>(DARK_MODE_SETTING_KEY, 'auto');
+	if (raw === 'off' || raw === 'on' || raw === 'auto') {
+		return raw;
+	}
+	return 'auto';
+}
 
 type PdfOutlineEntry = {
 	title: string;
@@ -588,6 +620,9 @@ const data = await vscode.workspace.fs.readFile(document.uri);
 const base64 = Buffer.from(data).toString('base64');
 const key = document.uri.toString();
 const initialPage = this.pendingPageByDocumentKey.get(key);
+const darkModePreference = getDarkModePreference(vscode.workspace.getConfiguration('vscode-pdf-docs'));
+const isDarkTheme = vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Dark
+	|| vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.HighContrast;
 if (initialPage !== undefined) {
 	this.pendingPageByDocumentKey.delete(key);
 }
@@ -595,7 +630,9 @@ await webviewPanel.webview.postMessage({
 type: 'loadPdf',
 base64,
 fileName: document.uri.path.split('/').pop() ?? '',
-initialPage
+initialPage,
+darkModePreference,
+isDarkTheme
 });
 } catch (error) {
 const message = error instanceof Error ? error.message : String(error);
@@ -724,6 +761,31 @@ type: 'requestNativeGoToPageDialog'
 return true;
 }
 
+public async refreshDarkModeForPanels(): Promise<void> {
+	const darkModePreference = getDarkModePreference(vscode.workspace.getConfiguration('vscode-pdf-docs'));
+	const isDarkTheme = vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Dark
+		|| vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.HighContrast;
+
+	for (const panel of this.panelDocumentByPanel.keys()) {
+		await panel.webview.postMessage({
+			type: 'setDarkModePreference',
+			darkModePreference,
+			isDarkTheme
+		});
+	}
+}
+
+public async triggerNativeToggleDarkModeForActiveEditor(): Promise<boolean> {
+	if (!this.activePanel) {
+		return false;
+	}
+
+	await this.activePanel.webview.postMessage({
+		type: 'toggleDarkMode'
+	});
+	return true;
+}
+
 private getHtmlForWebview(webview: vscode.Webview): string {
 const nonce = randomBytes(16).toString('base64');
 const pdfjsUri = webview.asWebviewUri(
@@ -792,6 +854,19 @@ user-select: text;
 }
 .textLayer ::selection {
 background: rgba(0, 120, 215, 0.35);
+}
+body.dark-mode {
+background: #0e0e0e;
+}
+body.dark-mode #viewport {
+background: #0e0e0e;
+}
+body.dark-mode .page-slot canvas {
+filter: invert(1) hue-rotate(180deg) contrast(0.92) brightness(0.96);
+}
+body.dark-mode #status {
+background: rgba(20, 20, 20, 0.92);
+color: #d4d4d4;
 }
 .linkLayer {
 position: absolute;
@@ -864,6 +939,26 @@ let estimatedPageWidthAtScale1 = 800;
 let estimatedPageHeightAtScale1 = 1131;
 let pageSizeScale1ByIndex = new Map();
 let renderedScaleByPage = new Map();
+let darkModePreference = 'auto';
+let hostDarkTheme = false;
+
+function isDarkModeActive() {
+if (darkModePreference === 'on') { return true; }
+if (darkModePreference === 'off') { return false; }
+return hostDarkTheme;
+}
+
+function applyDarkModeState() {
+document.body.classList.toggle('dark-mode', isDarkModeActive());
+}
+
+function setDarkModePreference(nextPreference, isDarkTheme) {
+if (nextPreference === 'on' || nextPreference === 'off' || nextPreference === 'auto') {
+darkModePreference = nextPreference;
+}
+hostDarkTheme = !!isDarkTheme;
+applyDarkModeState();
+}
 
 function pruneCache(cache, maxSize) {
 while (cache.size > maxSize) {
@@ -1658,10 +1753,15 @@ goToPage(page);
 }
 return;
 }
+if (msg.type === 'setDarkModePreference') {
+setDarkModePreference(msg.darkModePreference, msg.isDarkTheme);
+return;
+}
 if (msg.type !== 'loadPdf' || !msg.base64) { return; }
 
 statusEl.textContent = 'Opening PDF...';
 try {
+setDarkModePreference(msg.darkModePreference, msg.isDarkTheme);
 const binary = atob(msg.base64);
 const data = new Uint8Array(binary.length);
 for (let i = 0; i < binary.length; i++) { data[i] = binary.charCodeAt(i); }

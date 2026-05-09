@@ -147,11 +147,30 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 			padding: 16px;
 			background: var(--vscode-editor-background);
 		}
+		.pages-root {
+			--zoom-scale: 1;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			width: 100%;
+		}
+		.pdf-page {
+			text-align: center;
+			margin-bottom: 20px;
+			page-break-after: always;
+			position: relative;
+			overflow: hidden;
+			width: calc(var(--base-width) * var(--zoom-scale));
+			height: calc(var(--base-height) * var(--zoom-scale));
+		}
 		canvas {
 			box-shadow: 0 8px 30px rgba(0, 0, 0, 0.24);
 			background: white;
-			max-width: 100%;
+			max-width: none;
 			margin-bottom: 8px;
+			transform-origin: top left;
+			transform: scale(var(--zoom-scale));
+			display: block;
 		}
 		.status {
 			padding: 10px 12px;
@@ -183,10 +202,31 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 		const zoomInput = document.getElementById('zoom');
 		const filenameEl = document.getElementById('filename');
 		const viewportEl = document.getElementById('viewport');
+		const zoomOutButton = document.getElementById('zoomOut');
+		const zoomInButton = document.getElementById('zoomIn');
 
 		let pdfDoc = null;
 		let zoom = 1.0;
+		let renderedZoom = 1.0;
 		let renderTasks = [];
+		let renderGeneration = 0;
+		let rerenderTimer = null;
+		let activePagesRoot = null;
+		let pendingAnchor = null;
+		let rerenderInProgress = false;
+		let rerenderQueued = false;
+		let queuedZoom = 1.0;
+
+		const ZOOM_MIN = 0.25;
+		const ZOOM_MAX = 3.0;
+		const ZOOM_STEP = 0.1;
+		const RERENDER_DEBOUNCE_MS = 220;
+
+		const clampZoom = (value) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
+		const clampScrollTop = (value) => {
+			const maxScrollTop = Math.max(0, viewportEl.scrollHeight - viewportEl.clientHeight);
+			return Math.max(0, Math.min(maxScrollTop, value));
+		};
 
 		const updateStatus = (text) => {
 			statusEl.textContent = text;
@@ -197,68 +237,182 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 			zoomInput.value = Math.round(zoom * 100);
 		};
 
-		const renderAllPages = async () => {
+		const cancelActiveRenders = () => {
+			for (const task of renderTasks) {
+				if (typeof task.cancel === 'function') {
+					try {
+						task.cancel();
+					} catch (error) {
+						console.error('Failed to cancel render task:', error);
+					}
+				}
+			}
+			renderTasks = [];
+		};
+
+		const applyCssZoom = () => {
+			const scale = zoom / renderedZoom;
+			if (activePagesRoot) {
+				activePagesRoot.style.setProperty('--zoom-scale', String(scale));
+			}
+		};
+
+		const createPagesRoot = () => {
+			const root = document.createElement('div');
+			root.className = 'pages-root';
+			root.style.setProperty('--zoom-scale', '1');
+			return root;
+		};
+
+		const renderAllPages = async (targetZoom) => {
 			if (!pdfDoc) {
 				return;
 			}
 
+			const generation = ++renderGeneration;
+			cancelActiveRenders();
+
 			updateStatus('Rendering pages...');
-			viewportEl.innerHTML = '';
-			renderTasks = [];
+
+			const nextPagesRoot = createPagesRoot();
 
 			for (let pageIdx = 1; pageIdx <= pdfDoc.numPages; pageIdx += 1) {
+				if (generation !== renderGeneration) {
+					return;
+				}
+
 				const pageDiv = document.createElement('div');
-				pageDiv.style.textAlign = 'center';
-				pageDiv.style.marginBottom = '16px';
-				pageDiv.style.pageBreakAfter = 'always';
+				pageDiv.className = 'pdf-page';
 
 				const pageCanvas = document.createElement('canvas');
-				viewportEl.appendChild(pageDiv);
+				nextPagesRoot.appendChild(pageDiv);
 				pageDiv.appendChild(pageCanvas);
 
-				(async () => {
-					try {
-						const page = await pdfDoc.getPage(pageIdx);
-						const viewport = page.getViewport({ scale: zoom });
+				try {
+					const page = await pdfDoc.getPage(pageIdx);
+					const viewport = page.getViewport({ scale: targetZoom });
 
-						pageCanvas.width = Math.floor(viewport.width);
-						pageCanvas.height = Math.floor(viewport.height);
+					pageCanvas.width = Math.floor(viewport.width);
+					pageCanvas.height = Math.floor(viewport.height);
+					pageDiv.style.setProperty('--base-width', String(pageCanvas.width) + 'px');
+					pageDiv.style.setProperty('--base-height', String(pageCanvas.height) + 'px');
 
-						const ctx = pageCanvas.getContext('2d');
-						if (!ctx) return;
-
-						const renderTask = page.render({ canvasContext: ctx, viewport });
-						renderTasks.push(renderTask);
-						await renderTask.promise;
-					} catch (error) {
-						console.error('Failed to render page ' + pageIdx + ':', error);
+					const ctx = pageCanvas.getContext('2d');
+					if (!ctx) {
+						continue;
 					}
-				})();
+
+					const renderTask = page.render({ canvasContext: ctx, viewport });
+					renderTasks.push(renderTask);
+					await renderTask.promise;
+					if (generation !== renderGeneration) {
+						return;
+					}
+				} catch (error) {
+					console.error('Failed to render page ' + pageIdx + ':', error);
+				}
 			}
 
-			// Wait a bit for all renders to complete
-			setTimeout(() => {
+			if (generation === renderGeneration) {
+				viewportEl.replaceChildren(nextPagesRoot);
+				activePagesRoot = nextPagesRoot;
+				renderedZoom = targetZoom;
+				applyCssZoom();
+				if (pendingAnchor) {
+					const maxVisualHeight = Math.max(1, viewportEl.scrollHeight);
+					const anchorDocumentY = pendingAnchor.ratio * maxVisualHeight;
+					viewportEl.scrollTop = clampScrollTop(anchorDocumentY - pendingAnchor.viewportY);
+				}
 				updateStatus('Done');
-			}, 1000);
+			}
 		};
 
-		document.getElementById('zoomOut').addEventListener('click', async () => {
-			zoom = Math.max(0.25, zoom - 0.1);
+		const processRerenderQueue = async () => {
+			if (rerenderInProgress) {
+				return;
+			}
+
+			rerenderInProgress = true;
+			try {
+				while (rerenderQueued) {
+					rerenderQueued = false;
+					const targetZoom = queuedZoom;
+					await renderAllPages(targetZoom);
+
+					if (Math.abs(zoom - targetZoom) > 0.0001) {
+						rerenderQueued = true;
+						queuedZoom = zoom;
+					}
+				}
+			} finally {
+				rerenderInProgress = false;
+			}
+		};
+
+		const scheduleRerender = () => {
+			if (rerenderTimer) {
+				clearTimeout(rerenderTimer);
+			}
+
+			rerenderTimer = setTimeout(() => {
+				rerenderTimer = null;
+				rerenderQueued = true;
+				queuedZoom = zoom;
+				void processRerenderQueue();
+			}, RERENDER_DEBOUNCE_MS);
+		};
+
+		const setZoom = (nextZoom, viewportAnchorY) => {
+			const clamped = clampZoom(nextZoom);
+			if (Math.abs(clamped - zoom) < 0.0001) {
+				return;
+			}
+
+			const anchorY =
+				typeof viewportAnchorY === 'number'
+					? Math.max(0, Math.min(viewportEl.clientHeight, viewportAnchorY))
+					: viewportEl.clientHeight / 2;
+			const oldScrollHeight = Math.max(1, viewportEl.scrollHeight);
+			const anchorDocumentY = viewportEl.scrollTop + anchorY;
+			const anchorRatio = anchorDocumentY / oldScrollHeight;
+
+			zoom = clamped;
 			updateZoomLabel();
-			await renderAllPages();
+			applyCssZoom();
+			const newScrollHeight = Math.max(1, viewportEl.scrollHeight);
+			const nextAnchorDocumentY = anchorRatio * newScrollHeight;
+			viewportEl.scrollTop = clampScrollTop(nextAnchorDocumentY - anchorY);
+			pendingAnchor = {
+				viewportY: anchorY,
+				ratio: anchorRatio
+			};
+
+			scheduleRerender();
+		};
+
+		zoomOutButton.addEventListener('click', () => {
+			setZoom(zoom - ZOOM_STEP, viewportEl.clientHeight / 2);
 		});
 
-		document.getElementById('zoomIn').addEventListener('click', async () => {
-			zoom = Math.min(3, zoom + 0.1);
-			updateZoomLabel();
-			await renderAllPages();
+		zoomInButton.addEventListener('click', () => {
+			setZoom(zoom + ZOOM_STEP, viewportEl.clientHeight / 2);
 		});
 
-		zoomInput.addEventListener('change', async () => {
-			zoom = Number(zoomInput.value) / 100;
-			updateZoomLabel();
-			await renderAllPages();
+		zoomInput.addEventListener('input', () => {
+			setZoom(Number(zoomInput.value) / 100, viewportEl.clientHeight / 2);
 		});
+
+		viewportEl.addEventListener('wheel', (event) => {
+			if (!event.ctrlKey) {
+				return;
+			}
+
+			event.preventDefault();
+			const wheelFactor = Math.exp(-event.deltaY * 0.002);
+			const rect = viewportEl.getBoundingClientRect();
+			const anchorY = event.clientY - rect.top;
+			setZoom(zoom * wheelFactor, anchorY);
+		}, { passive: false });
 
 		window.addEventListener('message', async (event) => {
 			const message = event.data;
@@ -284,9 +438,21 @@ class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 
 				const loadingTask = pdfjsLib.getDocument({ data });
 				pdfDoc = await loadingTask.promise;
+				if (rerenderTimer) {
+					clearTimeout(rerenderTimer);
+					rerenderTimer = null;
+				}
+				rerenderQueued = false;
+				queuedZoom = 1.0;
+				renderGeneration += 1;
+				cancelActiveRenders();
+				viewportEl.innerHTML = '';
+				activePagesRoot = null;
+				pendingAnchor = null;
 				zoom = 1.0;
+				renderedZoom = 1.0;
 				updateZoomLabel();
-				await renderAllPages();
+				await renderAllPages(renderedZoom);
 			} catch (error) {
 				const messageText = error instanceof Error ? error.message : String(error);
 				updateStatus('Failed to render PDF: ' + messageText);

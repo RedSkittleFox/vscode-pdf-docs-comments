@@ -1,484 +1,260 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
-import { dirname } from 'node:path';
 
 export function activate(context: vscode.ExtensionContext) {
-	console.log('vscode-pdf-docs activated');
-
-	const providerRegistration = vscode.window.registerCustomEditorProvider(
-		'vscode-pdf-docs.pdfPreview',
-		new PdfReadonlyEditorProvider(context),
-		{
-			webviewOptions: {
-				retainContextWhenHidden: true
-			},
-			supportsMultipleEditorsPerDocument: true
-		}
-	);
-
-	context.subscriptions.push(providerRegistration);
+const providerRegistration = vscode.window.registerCustomEditorProvider(
+'vscode-pdf-docs.pdfPreview',
+new PdfReadonlyEditorProvider(context),
+{
+webviewOptions: { retainContextWhenHidden: true },
+supportsMultipleEditorsPerDocument: true
+}
+);
+context.subscriptions.push(providerRegistration);
 }
 
 export function deactivate() {}
 
 class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<PdfDocument> {
-	constructor(private readonly extensionContext: vscode.ExtensionContext) {}
+constructor(private readonly extensionContext: vscode.ExtensionContext) {}
 
-	public async openCustomDocument(uri: vscode.Uri): Promise<PdfDocument> {
-		return PdfDocument.create(uri);
-	}
+public async openCustomDocument(uri: vscode.Uri): Promise<PdfDocument> {
+return PdfDocument.create(uri);
+}
 
-	public async resolveCustomEditor(
-		document: PdfDocument,
-		webviewPanel: vscode.WebviewPanel
-	): Promise<void> {
-		webviewPanel.webview.options = {
-			enableScripts: true,
-			localResourceRoots: [this.extensionContext.extensionUri]
-		};
+public async resolveCustomEditor(
+document: PdfDocument,
+webviewPanel: vscode.WebviewPanel
+): Promise<void> {
+webviewPanel.webview.options = {
+enableScripts: true,
+localResourceRoots: [this.extensionContext.extensionUri]
+};
+webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
-		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
+const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async (event) => {
+if (event?.type !== 'ready') { return; }
+try {
+const data = await vscode.workspace.fs.readFile(document.uri);
+const base64 = Buffer.from(data).toString('base64');
+await webviewPanel.webview.postMessage({
+type: 'loadPdf',
+base64,
+fileName: document.uri.path.split('/').pop() ?? ''
+});
+} catch (error) {
+const message = error instanceof Error ? error.message : String(error);
+await webviewPanel.webview.postMessage({ type: 'error', message });
+}
+});
 
-		const postDocument = async () => {
-			try {
-				const data = await vscode.workspace.fs.readFile(document.uri);
-				const base64 = Buffer.from(data).toString('base64');
-				await webviewPanel.webview.postMessage({
-					type: 'loadPdf',
-					base64,
-					fileName: getFileName(document.uri)
-				});
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				await webviewPanel.webview.postMessage({
-					type: 'error',
-					message: `Could not open PDF: ${message}`
-				});
-			}
-		};
+webviewPanel.onDidDispose(() => {
+messageSubscription.dispose();
+document.dispose();
+});
+}
 
-		const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async (event) => {
-			if (event?.type === 'ready') {
-				await postDocument();
-			}
-		});
+private getHtmlForWebview(webview: vscode.Webview): string {
+const nonce = randomBytes(16).toString('base64');
+const pdfjsUri = webview.asWebviewUri(
+vscode.Uri.joinPath(this.extensionContext.extensionUri, 'node_modules', 'pdfjs-dist', 'build', 'pdf.mjs')
+);
+const workerUri = webview.asWebviewUri(
+vscode.Uri.joinPath(this.extensionContext.extensionUri, 'node_modules', 'pdfjs-dist', 'build', 'pdf.worker.mjs')
+);
 
-		webviewPanel.onDidDispose(() => {
-			messageSubscription.dispose();
-			document.dispose();
-		});
-	}
-
-	private getHtmlForWebview(webview: vscode.Webview): string {
-		const nonce = randomBytes(16).toString('base64');
-		const pdfjsUri = webview.asWebviewUri(
-			vscode.Uri.joinPath(this.extensionContext.extensionUri, 'node_modules', 'pdfjs-dist', 'build', 'pdf.mjs')
-		);
-		const workerUri = webview.asWebviewUri(
-			vscode.Uri.joinPath(this.extensionContext.extensionUri, 'node_modules', 'pdfjs-dist', 'build', 'pdf.worker.mjs')
-		);
-
-		return `<!DOCTYPE html>
+return `<!DOCTYPE html>
 <html lang="en">
 <head>
-	<meta charset="UTF-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}' ${webview.cspSource}; connect-src ${webview.cspSource};" />
-	<title>PDF Preview</title>
-	<style nonce="${nonce}">
-		:root {
-			color-scheme: light dark;
-		}
-		body {
-			margin: 0;
-			font-family: var(--vscode-font-family);
-			background: var(--vscode-editor-background);
-			color: var(--vscode-editor-foreground);
-			display: flex;
-			flex-direction: column;
-			min-height: 100vh;
-		}
-		.toolbar {
-			display: flex;
-			align-items: center;
-			gap: 8px;
-			padding: 8px;
-			border-bottom: 1px solid var(--vscode-editorWidget-border);
-			position: sticky;
-			top: 0;
-			background: var(--vscode-editor-background);
-			z-index: 1;
-		}
-		.toolbar button {
-			border: 1px solid var(--vscode-button-border, transparent);
-			background: var(--vscode-button-background);
-			color: var(--vscode-button-foreground);
-			padding: 4px 8px;
-			cursor: pointer;
-		}
-		.toolbar button:hover {
-			background: var(--vscode-button-hoverBackground);
-		}
-		.toolbar input {
-			width: 56px;
-			background: var(--vscode-input-background);
-			color: var(--vscode-input-foreground);
-			border: 1px solid var(--vscode-input-border);
-			padding: 3px 6px;
-		}
-		.toolbar input[type="range"] {
-			width: 100px;
-		}
-		.filename {
-			margin-right: auto;
-			opacity: 0.8;
-			font-size: 0.9em;
-			white-space: nowrap;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			max-width: 40vw;
-		}
-		.viewport {
-			flex: 1;
-			overflow: auto;
-			display: flex;
-			flex-direction: column;
-			align-items: center;
-			padding: 16px;
-			background: var(--vscode-editor-background);
-		}
-		.pages-root {
-			--zoom-scale: 1;
-			display: flex;
-			flex-direction: column;
-			align-items: center;
-			width: 100%;
-		}
-		.pdf-page {
-			text-align: center;
-			margin-bottom: 20px;
-			page-break-after: always;
-			position: relative;
-			overflow: hidden;
-			width: calc(var(--base-width) * var(--zoom-scale));
-			height: calc(var(--base-height) * var(--zoom-scale));
-		}
-		canvas {
-			box-shadow: 0 8px 30px rgba(0, 0, 0, 0.24);
-			background: white;
-			max-width: none;
-			margin-bottom: 8px;
-			transform-origin: top left;
-			transform: scale(var(--zoom-scale));
-			display: block;
-		}
-		.status {
-			padding: 10px 12px;
-			border-top: 1px solid var(--vscode-editorWidget-border);
-			opacity: 0.85;
-			min-height: 24px;
-		}
-	</style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}' ${webview.cspSource}; connect-src ${webview.cspSource};" />
+<title>PDF Preview</title>
+<style nonce="${nonce}">
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; background: var(--vscode-editor-background); }
+#viewport {
+width: 100%; height: 100%;
+overflow: auto;
+display: flex;
+flex-direction: column;
+align-items: center;
+padding: 16px;
+}
+#pages {
+display: flex;
+flex-direction: column;
+align-items: center;
+gap: 16px;
+transform-origin: top center;
+}
+canvas {
+display: block;
+box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+#status {
+position: fixed;
+bottom: 8px;
+left: 50%;
+transform: translateX(-50%);
+background: var(--vscode-editorWidget-background, #252526);
+color: var(--vscode-editorWidget-foreground, #ccc);
+padding: 4px 12px;
+border-radius: 4px;
+font-size: 12px;
+font-family: var(--vscode-font-family, sans-serif);
+pointer-events: none;
+opacity: 0.9;
+}
+</style>
 </head>
 <body>
-	<div class="toolbar">
-		<span id="filename" class="filename"></span>
-		<button id="zoomOut">−</button>
-		<input id="zoom" type="range" min="50" max="200" value="100" />
-		<button id="zoomIn">+</button>
-		<span id="zoomLabel">100%</span>
-	</div>
-	<div class="viewport" id="viewport"></div>
-	<div class="status" id="status">Loading...</div>
+<div id="viewport">
+<div id="pages"></div>
+</div>
+<div id="status">Loading...</div>
+<script nonce="${nonce}" type="module">
+import * as pdfjsLib from '${pdfjsUri}';
+pdfjsLib.GlobalWorkerOptions.workerSrc = '${workerUri}';
 
-	<script nonce="${nonce}" type="module">
-		import * as pdfjsLib from '${pdfjsUri}';
+const vscode = acquireVsCodeApi();
+const viewportEl = document.getElementById('viewport');
+const pagesEl = document.getElementById('pages');
+const statusEl = document.getElementById('status');
 
-		const vscode = acquireVsCodeApi();
-		pdfjsLib.GlobalWorkerOptions.workerSrc = '${workerUri}';
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 4.0;
+const RERENDER_DELAY_MS = 400;
 
-		const statusEl = document.getElementById('status');
-		const zoomLabel = document.getElementById('zoomLabel');
-		const zoomInput = document.getElementById('zoom');
-		const filenameEl = document.getElementById('filename');
-		const viewportEl = document.getElementById('viewport');
-		const zoomOutButton = document.getElementById('zoomOut');
-		const zoomInButton = document.getElementById('zoomIn');
+let pdfDoc = null;
+let zoom = 1.0;
+let renderedAtZoom = 1.0;
+let rerenderTimer = null;
+let renderGeneration = 0;
 
-		let pdfDoc = null;
-		let zoom = 1.0;
-		let renderedZoom = 1.0;
-		let renderTasks = [];
-		let renderGeneration = 0;
-		let rerenderTimer = null;
-		let activePagesRoot = null;
-		let pendingAnchor = null;
-		let rerenderInProgress = false;
-		let rerenderQueued = false;
-		let queuedZoom = 1.0;
+// --- rendering ---
 
-		const ZOOM_MIN = 0.25;
-		const ZOOM_MAX = 3.0;
-		const ZOOM_STEP = 0.1;
-		const RERENDER_DEBOUNCE_MS = 220;
+async function renderAllPages(targetZoom) {
+if (!pdfDoc) { return; }
+const gen = ++renderGeneration;
+statusEl.textContent = 'Rendering...';
 
-		const clampZoom = (value) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
-		const clampScrollTop = (value) => {
-			const maxScrollTop = Math.max(0, viewportEl.scrollHeight - viewportEl.clientHeight);
-			return Math.max(0, Math.min(maxScrollTop, value));
-		};
+const next = document.createDocumentFragment();
+const canvases = [];
 
-		const updateStatus = (text) => {
-			statusEl.textContent = text;
-		};
+for (let i = 1; i <= pdfDoc.numPages; i++) {
+if (gen !== renderGeneration) { return; }
+const canvas = document.createElement('canvas');
+canvases.push({ canvas, pageNum: i });
+next.appendChild(canvas);
+}
 
-		const updateZoomLabel = () => {
-			zoomLabel.textContent = Math.round(zoom * 100) + '%';
-			zoomInput.value = Math.round(zoom * 100);
-		};
+// swap immediately (blank canvases) so scrollHeight is correct
+pagesEl.replaceChildren(next);
+renderedAtZoom = targetZoom;
+pagesEl.style.zoom = '1';
 
-		const cancelActiveRenders = () => {
-			for (const task of renderTasks) {
-				if (typeof task.cancel === 'function') {
-					try {
-						task.cancel();
-					} catch (error) {
-						console.error('Failed to cancel render task:', error);
-					}
-				}
-			}
-			renderTasks = [];
-		};
+for (const { canvas, pageNum } of canvases) {
+if (gen !== renderGeneration) { return; }
+try {
+const page = await pdfDoc.getPage(pageNum);
+const vp = page.getViewport({ scale: targetZoom });
+canvas.width = Math.floor(vp.width);
+canvas.height = Math.floor(vp.height);
+const ctx = canvas.getContext('2d');
+if (!ctx) { continue; }
+await page.render({ canvasContext: ctx, viewport: vp }).promise;
+if (gen !== renderGeneration) { return; }
+} catch (e) {
+console.error('render page', pageNum, e);
+}
+}
 
-		const applyCssZoom = () => {
-			const scale = zoom / renderedZoom;
-			if (activePagesRoot) {
-				activePagesRoot.style.setProperty('--zoom-scale', String(scale));
-			}
-		};
+if (gen === renderGeneration) {
+// restore css zoom so visible scale stays correct
+const cssZoom = zoom / renderedAtZoom;
+pagesEl.style.zoom = String(cssZoom);
+statusEl.textContent = Math.round(zoom * 100) + '%';
+}
+}
 
-		const createPagesRoot = () => {
-			const root = document.createElement('div');
-			root.className = 'pages-root';
-			root.style.setProperty('--zoom-scale', '1');
-			return root;
-		};
+function scheduleRerender() {
+if (rerenderTimer) { clearTimeout(rerenderTimer); }
+rerenderTimer = setTimeout(() => {
+rerenderTimer = null;
+renderAllPages(zoom);
+}, RERENDER_DELAY_MS);
+}
 
-		const renderAllPages = async (targetZoom) => {
-			if (!pdfDoc) {
-				return;
-			}
+// --- zoom ---
 
-			const generation = ++renderGeneration;
-			cancelActiveRenders();
+function applyZoom(newZoom, mouseClientY) {
+const prev = zoom;
+zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, newZoom));
+if (zoom === prev) { return; }
 
-			updateStatus('Rendering pages...');
+// anchor: fraction of scrollHeight under mouse before scale change
+const rect = viewportEl.getBoundingClientRect();
+const mouseY = mouseClientY !== undefined ? mouseClientY - rect.top : viewportEl.clientHeight / 2;
+const docY = viewportEl.scrollTop + mouseY;
+const prevScrollHeight = viewportEl.scrollHeight;
 
-			const nextPagesRoot = createPagesRoot();
+// change css zoom (layout property - scrollHeight changes immediately)
+const cssZoom = zoom / renderedAtZoom;
+pagesEl.style.zoom = String(cssZoom);
 
-			for (let pageIdx = 1; pageIdx <= pdfDoc.numPages; pageIdx += 1) {
-				if (generation !== renderGeneration) {
-					return;
-				}
+// restore anchor
+const newScrollHeight = viewportEl.scrollHeight;
+const scale = newScrollHeight / Math.max(1, prevScrollHeight);
+viewportEl.scrollTop = docY * scale - mouseY;
 
-				const pageDiv = document.createElement('div');
-				pageDiv.className = 'pdf-page';
+statusEl.textContent = Math.round(zoom * 100) + '%';
+scheduleRerender();
+}
 
-				const pageCanvas = document.createElement('canvas');
-				nextPagesRoot.appendChild(pageDiv);
-				pageDiv.appendChild(pageCanvas);
+viewportEl.addEventListener('wheel', (e) => {
+if (!e.ctrlKey) { return; }
+e.preventDefault();
+const factor = Math.exp(-e.deltaY * 0.002);
+applyZoom(zoom * factor, e.clientY);
+}, { passive: false });
 
-				try {
-					const page = await pdfDoc.getPage(pageIdx);
-					const viewport = page.getViewport({ scale: targetZoom });
+// --- message from extension ---
 
-					pageCanvas.width = Math.floor(viewport.width);
-					pageCanvas.height = Math.floor(viewport.height);
-					pageDiv.style.setProperty('--base-width', String(pageCanvas.width) + 'px');
-					pageDiv.style.setProperty('--base-height', String(pageCanvas.height) + 'px');
+window.addEventListener('message', async (event) => {
+const msg = event.data;
+if (msg.type === 'error') {
+statusEl.textContent = 'Error: ' + msg.message;
+return;
+}
+if (msg.type !== 'loadPdf' || !msg.base64) { return; }
 
-					const ctx = pageCanvas.getContext('2d');
-					if (!ctx) {
-						continue;
-					}
+statusEl.textContent = 'Opening PDF...';
+try {
+const binary = atob(msg.base64);
+const data = new Uint8Array(binary.length);
+for (let i = 0; i < binary.length; i++) { data[i] = binary.charCodeAt(i); }
+pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+zoom = 1.0;
+renderedAtZoom = 1.0;
+pagesEl.style.zoom = '1';
+await renderAllPages(zoom);
+} catch (e) {
+statusEl.textContent = 'Failed: ' + (e instanceof Error ? e.message : String(e));
+}
+});
 
-					const renderTask = page.render({ canvasContext: ctx, viewport });
-					renderTasks.push(renderTask);
-					await renderTask.promise;
-					if (generation !== renderGeneration) {
-						return;
-					}
-				} catch (error) {
-					console.error('Failed to render page ' + pageIdx + ':', error);
-				}
-			}
-
-			if (generation === renderGeneration) {
-				viewportEl.replaceChildren(nextPagesRoot);
-				activePagesRoot = nextPagesRoot;
-				renderedZoom = targetZoom;
-				applyCssZoom();
-				if (pendingAnchor) {
-					const maxVisualHeight = Math.max(1, viewportEl.scrollHeight);
-					const anchorDocumentY = pendingAnchor.ratio * maxVisualHeight;
-					viewportEl.scrollTop = clampScrollTop(anchorDocumentY - pendingAnchor.viewportY);
-				}
-				updateStatus('Done');
-			}
-		};
-
-		const processRerenderQueue = async () => {
-			if (rerenderInProgress) {
-				return;
-			}
-
-			rerenderInProgress = true;
-			try {
-				while (rerenderQueued) {
-					rerenderQueued = false;
-					const targetZoom = queuedZoom;
-					await renderAllPages(targetZoom);
-
-					if (Math.abs(zoom - targetZoom) > 0.0001) {
-						rerenderQueued = true;
-						queuedZoom = zoom;
-					}
-				}
-			} finally {
-				rerenderInProgress = false;
-			}
-		};
-
-		const scheduleRerender = () => {
-			if (rerenderTimer) {
-				clearTimeout(rerenderTimer);
-			}
-
-			rerenderTimer = setTimeout(() => {
-				rerenderTimer = null;
-				rerenderQueued = true;
-				queuedZoom = zoom;
-				void processRerenderQueue();
-			}, RERENDER_DEBOUNCE_MS);
-		};
-
-		const setZoom = (nextZoom, viewportAnchorY) => {
-			const clamped = clampZoom(nextZoom);
-			if (Math.abs(clamped - zoom) < 0.0001) {
-				return;
-			}
-
-			const anchorY =
-				typeof viewportAnchorY === 'number'
-					? Math.max(0, Math.min(viewportEl.clientHeight, viewportAnchorY))
-					: viewportEl.clientHeight / 2;
-			const oldScrollHeight = Math.max(1, viewportEl.scrollHeight);
-			const anchorDocumentY = viewportEl.scrollTop + anchorY;
-			const anchorRatio = anchorDocumentY / oldScrollHeight;
-
-			zoom = clamped;
-			updateZoomLabel();
-			applyCssZoom();
-			const newScrollHeight = Math.max(1, viewportEl.scrollHeight);
-			const nextAnchorDocumentY = anchorRatio * newScrollHeight;
-			viewportEl.scrollTop = clampScrollTop(nextAnchorDocumentY - anchorY);
-			pendingAnchor = {
-				viewportY: anchorY,
-				ratio: anchorRatio
-			};
-
-			scheduleRerender();
-		};
-
-		zoomOutButton.addEventListener('click', () => {
-			setZoom(zoom - ZOOM_STEP, viewportEl.clientHeight / 2);
-		});
-
-		zoomInButton.addEventListener('click', () => {
-			setZoom(zoom + ZOOM_STEP, viewportEl.clientHeight / 2);
-		});
-
-		zoomInput.addEventListener('input', () => {
-			setZoom(Number(zoomInput.value) / 100, viewportEl.clientHeight / 2);
-		});
-
-		viewportEl.addEventListener('wheel', (event) => {
-			if (!event.ctrlKey) {
-				return;
-			}
-
-			event.preventDefault();
-			const wheelFactor = Math.exp(-event.deltaY * 0.002);
-			const rect = viewportEl.getBoundingClientRect();
-			const anchorY = event.clientY - rect.top;
-			setZoom(zoom * wheelFactor, anchorY);
-		}, { passive: false });
-
-		window.addEventListener('message', async (event) => {
-			const message = event.data;
-
-			if (message.type === 'error') {
-				updateStatus(message.message || 'Unknown error');
-				return;
-			}
-
-			if (message.type !== 'loadPdf' || !message.base64) {
-				return;
-			}
-
-			try {
-				updateStatus('Opening PDF...');
-				filenameEl.textContent = message.fileName || '';
-
-				const binary = atob(message.base64);
-				const data = new Uint8Array(binary.length);
-				for (let i = 0; i < binary.length; i += 1) {
-					data[i] = binary.charCodeAt(i);
-				}
-
-				const loadingTask = pdfjsLib.getDocument({ data });
-				pdfDoc = await loadingTask.promise;
-				if (rerenderTimer) {
-					clearTimeout(rerenderTimer);
-					rerenderTimer = null;
-				}
-				rerenderQueued = false;
-				queuedZoom = 1.0;
-				renderGeneration += 1;
-				cancelActiveRenders();
-				viewportEl.innerHTML = '';
-				activePagesRoot = null;
-				pendingAnchor = null;
-				zoom = 1.0;
-				renderedZoom = 1.0;
-				updateZoomLabel();
-				await renderAllPages(renderedZoom);
-			} catch (error) {
-				const messageText = error instanceof Error ? error.message : String(error);
-				updateStatus('Failed to render PDF: ' + messageText);
-			}
-		});
-
-		vscode.postMessage({ type: 'ready' });
-	</script>
+vscode.postMessage({ type: 'ready' });
+</script>
 </body>
 </html>`;
-	}
+}
 }
 
 class PdfDocument implements vscode.CustomDocument {
-	private constructor(public readonly uri: vscode.Uri) {}
-
-	public static async create(uri: vscode.Uri): Promise<PdfDocument> {
-		return new PdfDocument(uri);
-	}
-
-	public dispose(): void {
-		// No resources to release for readonly documents.
-	}
+private constructor(public readonly uri: vscode.Uri) {}
+public static async create(uri: vscode.Uri): Promise<PdfDocument> {
+return new PdfDocument(uri);
 }
-
-function getFileName(uri: vscode.Uri): string {
-	const lastSegment = uri.path.split('/').pop();
-	return lastSegment ?? uri.path;
+public dispose(): void {}
 }

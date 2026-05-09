@@ -1,5 +1,5 @@
 {
-  "name": "vscode-pdf-docs",
+  "name": "vscode-pdf-docs-comments",
   "publisher": "RedSkittleFox",
   "displayName": "vscode-pdf-docs",
   "description": "A PDF viewer for VS Code with linkable document sections",

@@ -4,7 +4,7 @@
   "description": "A PDF viewer for VS Code with linkable document sections",
   "version": "1.0.0",
   "engines": {
-    "vscode": "^1.115.0"
+    "vscode": "^1.118.0"
   },
   "categories": [
     "Other"

@@ -62,6 +62,32 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "vscode-pdf-docs.revealOutlinePage",
+          "when": "false"
+        },
+        {
+          "command": "vscode-pdf-docs.openPdfCommentReference",
+          "when": "false"
+        },
+        {
+          "command": "vscode-pdf-docs.copyOutlineSectionName",
+          "when": "false"
+        },
+        {
+          "command": "vscode-pdf-docs.copyOutlineFullPath",
+          "when": "false"
+        },
+        {
+          "command": "vscode-pdf-docs.copyOutlineSectionPath",
+          "when": "false"
+        },
+        {
+          "command": "vscode-pdf-docs.copyOutlineFullSectionPath",
+          "when": "false"
+        }
+      ],
       "view/item/context": [
         {
           "command": "vscode-pdf-docs.copyOutlineSectionName",

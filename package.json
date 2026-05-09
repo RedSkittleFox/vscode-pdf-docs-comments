@@ -14,16 +14,42 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "views": {
+      "explorer": [
+        {
+          "id": "pdfOutlineExplorer",
+          "name": "PDF Outline",
+          "when": "activeCustomEditorId == vscode-pdf-docs.pdfPreview"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "vscode-pdf-docs.goToPage",
         "title": "PDF: Go to Page"
+      },
+      {
+        "command": "vscode-pdf-docs.showOutline",
+        "title": "PDF: Show Outline"
+      },
+      {
+        "command": "vscode-pdf-docs.refreshOutline",
+        "title": "PDF: Refresh Outline"
+      },
+      {
+        "command": "vscode-pdf-docs.revealOutlinePage",
+        "title": "PDF: Reveal Outline Page"
       }
     ],
     "keybindings": [
       {
         "command": "vscode-pdf-docs.goToPage",
         "key": "alt+g",
+        "when": "activeCustomEditorId == vscode-pdf-docs.pdfPreview"
+      },
+      {
+        "command": "vscode-pdf-docs.showOutline",
+        "key": "ctrl+shift+o",
         "when": "activeCustomEditorId == vscode-pdf-docs.pdfPreview"
       }
     ],

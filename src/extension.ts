@@ -2,21 +2,32 @@ import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 
 export function activate(context: vscode.ExtensionContext) {
+const provider = new PdfReadonlyEditorProvider(context);
 const providerRegistration = vscode.window.registerCustomEditorProvider(
 'vscode-pdf-docs.pdfPreview',
-new PdfReadonlyEditorProvider(context),
+provider,
 {
 webviewOptions: { retainContextWhenHidden: true },
 supportsMultipleEditorsPerDocument: true
 }
 );
+
+const goToPageCommand = vscode.commands.registerCommand('vscode-pdf-docs.goToPage', async () => {
+const handled = await provider.triggerNativeGoToPageForActiveEditor();
+if (!handled) {
+void vscode.window.showInformationMessage('Open a PDF preview tab to use Go to Page.');
+}
+});
 context.subscriptions.push(providerRegistration);
+context.subscriptions.push(goToPageCommand);
 }
 
 export function deactivate() {}
 
 class PdfReadonlyEditorProvider implements vscode.CustomReadonlyEditorProvider<PdfDocument> {
 constructor(private readonly extensionContext: vscode.ExtensionContext) {}
+
+private activePanel: vscode.WebviewPanel | undefined;
 
 public async openCustomDocument(uri: vscode.Uri): Promise<PdfDocument> {
 return PdfDocument.create(uri);
@@ -32,8 +43,18 @@ localResourceRoots: [this.extensionContext.extensionUri]
 };
 webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
+if (webviewPanel.active) {
+this.activePanel = webviewPanel;
+}
+
+const panelStateSubscription = webviewPanel.onDidChangeViewState((event) => {
+if (event.webviewPanel.active) {
+this.activePanel = event.webviewPanel;
+}
+});
+
 const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async (event) => {
-if (event?.type !== 'ready') { return; }
+if (event?.type === 'ready') {
 try {
 const data = await vscode.workspace.fs.readFile(document.uri);
 const base64 = Buffer.from(data).toString('base64');
@@ -46,12 +67,66 @@ fileName: document.uri.path.split('/').pop() ?? ''
 const message = error instanceof Error ? error.message : String(error);
 await webviewPanel.webview.postMessage({ type: 'error', message });
 }
+return;
+}
+
+if (event?.type === 'openGoToPageDialog') {
+const currentPage = Number(event.currentPage ?? 1);
+const totalPages = Number(event.totalPages ?? 1);
+const value = await vscode.window.showInputBox({
+title: 'Go to Page',
+prompt: `Enter page number (1-${Math.max(1, totalPages)})`,
+value: String(Math.max(1, currentPage)),
+valueSelection: [0, String(Math.max(1, currentPage)).length],
+validateInput: (input) => {
+const match = input.trim().match(/^:?(\d+)$/);
+if (!match) {
+return 'Use format :number or number';
+}
+const page = Number(match[1]);
+if (!Number.isFinite(page) || page < 1 || page > Math.max(1, totalPages)) {
+return `Page must be between 1 and ${Math.max(1, totalPages)}`;
+}
+return null;
+}
+});
+
+if (value === undefined) {
+return;
+}
+
+const match = value.trim().match(/^:?(\d+)$/);
+if (!match) {
+return;
+}
+
+const page = Number(match[1]);
+await webviewPanel.webview.postMessage({
+type: 'goToPage',
+page
+});
+}
 });
 
 webviewPanel.onDidDispose(() => {
+panelStateSubscription.dispose();
+if (this.activePanel === webviewPanel) {
+this.activePanel = undefined;
+}
 messageSubscription.dispose();
 document.dispose();
 });
+}
+
+public async triggerNativeGoToPageForActiveEditor(): Promise<boolean> {
+if (!this.activePanel) {
+return false;
+}
+
+await this.activePanel.webview.postMessage({
+type: 'requestNativeGoToPageDialog'
+});
+return true;
 }
 
 private getHtmlForWebview(webview: vscode.Webview): string {
@@ -198,6 +273,36 @@ const vis = Math.max(0, Math.min(elBot, bottom) - Math.max(elTop, top));
 if (vis > bestVis) { bestVis = vis; best = i; }
 }
 return best;
+}
+
+function getCurrentPageNumber() {
+return getFirstVisiblePageIndex() + 1;
+}
+
+function getTotalPages() {
+return pdfDoc?.numPages ?? 0;
+}
+
+function goToPage(pageNumber) {
+if (!pdfDoc) { return; }
+const target = Math.max(1, Math.min(pageNumber, pdfDoc.numPages));
+const slot = pagesEl.children[target - 1];
+if (!slot) { return; }
+
+const viewportRect = viewportEl.getBoundingClientRect();
+const slotRect = slot.getBoundingClientRect();
+const nextScrollTop = viewportEl.scrollTop + (slotRect.top - viewportRect.top) - 8;
+viewportEl.scrollTop = Math.max(0, nextScrollTop);
+statusEl.textContent = 'Page ' + target + '/' + pdfDoc.numPages + ' - ' + Math.round(zoom * 100) + '%';
+}
+
+function requestNativeGoToPageDialog() {
+if (!pdfDoc) { return; }
+vscode.postMessage({
+type: 'openGoToPageDialog',
+currentPage: getCurrentPageNumber(),
+totalPages: getTotalPages()
+});
 }
 
 function hasActiveSelectionInPages() {
@@ -436,11 +541,30 @@ const factor = Math.exp(-e.deltaY * 0.002);
 applyZoom(zoom * factor, e.clientY);
 }, { passive: false });
 
+window.addEventListener('keydown', (e) => {
+const isGoTo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'g';
+if (!isGoTo) { return; }
+e.preventDefault();
+
+requestNativeGoToPageDialog();
+});
+
 // --- message from extension ---
 
 window.addEventListener('message', async (event) => {
 const msg = event.data;
 if (msg.type === 'error') { statusEl.textContent = 'Error: ' + msg.message; return; }
+if (msg.type === 'requestNativeGoToPageDialog') {
+requestNativeGoToPageDialog();
+return;
+}
+if (msg.type === 'goToPage') {
+const page = Number(msg.page);
+if (Number.isFinite(page)) {
+goToPage(page);
+}
+return;
+}
 if (msg.type !== 'loadPdf' || !msg.base64) { return; }
 
 statusEl.textContent = 'Opening PDF...';

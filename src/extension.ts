@@ -135,18 +135,17 @@ let renderGeneration = 0;
 // --- rendering ---
 
 function getFirstVisiblePageIndex() {
-const canvases = pagesEl.querySelectorAll('canvas');
-if (canvases.length === 0) { return 0; }
-const viewportTop = viewportEl.scrollTop;
-const viewportBottom = viewportTop + viewportEl.clientHeight;
-let best = 0;
-let bestVisible = -1;
-for (let i = 0; i < canvases.length; i++) {
-const el = canvases[i];
-const top = el.offsetTop + pagesEl.offsetTop;
-const bottom = top + el.offsetHeight;
-const visible = Math.max(0, Math.min(bottom, viewportBottom) - Math.max(top, viewportTop));
-if (visible > bestVisible) { bestVisible = visible; best = i; }
+const slots = pagesEl.children;
+if (!slots.length) { return 0; }
+const top = viewportEl.scrollTop;
+const bottom = top + viewportEl.clientHeight;
+let best = 0, bestVis = -1;
+for (let i = 0; i < slots.length; i++) {
+const el = slots[i];
+const elTop = el.offsetTop;
+const elBot = elTop + el.offsetHeight;
+const vis = Math.max(0, Math.min(elBot, bottom) - Math.max(elTop, top));
+if (vis > bestVis) { bestVis = vis; best = i; }
 }
 return best;
 }
@@ -154,64 +153,46 @@ return best;
 async function renderAllPages(targetZoom, startIndex) {
 if (!pdfDoc) { return; }
 const gen = ++renderGeneration;
-statusEl.textContent = 'Rendering...';
+const numPages = pdfDoc.numPages;
+const first = Math.max(0, Math.min(startIndex !== undefined ? startIndex : 0, numPages - 1));
 
-const next = document.createDocumentFragment();
-const canvases = [];
+// Ensure correct number of slots (divs) in pagesEl - no layout change if count same
+while (pagesEl.children.length < numPages) { pagesEl.appendChild(document.createElement('div')); }
+while (pagesEl.children.length > numPages) { pagesEl.lastChild.remove(); }
 
-for (let i = 1; i <= pdfDoc.numPages; i++) {
-const canvas = document.createElement('canvas');
-canvases.push({ canvas, pageNum: i });
-next.appendChild(canvas);
+// Render order: visible page first, then outward
+const order = [first];
+for (let d = 1; d < numPages; d++) {
+if (first + d < numPages) { order.push(first + d); }
+if (first - d >= 0) { order.push(first - d); }
 }
 
-// swap immediately (blank canvases) so scrollHeight is correct
-pagesEl.replaceChildren(next);
-renderedAtZoom = targetZoom;
-pagesEl.style.zoom = '1';
-pagesEl.style.gap = (16 * targetZoom) + 'px';
-
-// build render order: start from visible page, then outward
-const first = startIndex !== undefined ? startIndex : 0;
-const order = [];
-for (let offset = 0; offset < canvases.length; offset++) {
-const fwd = first + offset;
-const bwd = first - offset;
-if (offset === 0) {
-order.push(first);
-} else {
-if (fwd < canvases.length) { order.push(fwd); }
-if (bwd >= 0) { order.push(bwd); }
-}
-}
-
+// Render all pages into off-DOM canvases, then swap everything atomically
+const rendered = new Map();
 for (const idx of order) {
 if (gen !== renderGeneration) { return; }
-const { canvas, pageNum } = canvases[idx];
+const canvas = document.createElement('canvas');
 try {
-const page = await pdfDoc.getPage(pageNum);
+const page = await pdfDoc.getPage(idx + 1);
 const vp = page.getViewport({ scale: targetZoom });
 canvas.width = Math.floor(vp.width);
 canvas.height = Math.floor(vp.height);
 const ctx = canvas.getContext('2d');
 if (!ctx) { continue; }
 await page.render({ canvasContext: ctx, viewport: vp }).promise;
+} catch (e) { console.error('render page', idx + 1, e); continue; }
 if (gen !== renderGeneration) { return; }
-// after first page rendered, restore zoom so visible content appears sharp
-if (idx === first) {
-const cssZoom = zoom / renderedAtZoom;
-pagesEl.style.zoom = String(cssZoom);
+rendered.set(idx, canvas);
 }
-} catch (e) {
-console.error('render page', pageNum, e);
+if (gen !== renderGeneration) { return; }
+// All canvases ready - one synchronous block: update zoom, then swap all slots
+renderedAtZoom = targetZoom;
+pagesEl.style.gap = (16 * targetZoom) + 'px';
+pagesEl.style.zoom = String(zoom / renderedAtZoom);
+for (const [idx, canvas] of rendered) {
+pagesEl.children[idx].replaceChildren(canvas);
 }
-}
-
-if (gen === renderGeneration) {
-const cssZoom = zoom / renderedAtZoom;
-pagesEl.style.zoom = String(cssZoom);
 statusEl.textContent = Math.round(zoom * 100) + '%';
-}
 }
 
 function scheduleRerender() {
@@ -230,20 +211,16 @@ const prev = zoom;
 zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, newZoom));
 if (zoom === prev) { return; }
 
-// anchor: fraction of scrollHeight under mouse before scale change
 const rect = viewportEl.getBoundingClientRect();
 const mouseY = mouseClientY !== undefined ? mouseClientY - rect.top : viewportEl.clientHeight / 2;
 const docY = viewportEl.scrollTop + mouseY;
 const prevScrollHeight = viewportEl.scrollHeight;
 
-// change css zoom (layout property - scrollHeight changes immediately)
-const cssZoom = zoom / renderedAtZoom;
-pagesEl.style.zoom = String(cssZoom);
+// CSS zoom is a layout property - scrollHeight updates synchronously
+pagesEl.style.zoom = String(zoom / renderedAtZoom);
 
-// restore anchor
 const newScrollHeight = viewportEl.scrollHeight;
-const scale = newScrollHeight / Math.max(1, prevScrollHeight);
-viewportEl.scrollTop = docY * scale - mouseY;
+viewportEl.scrollTop = docY * (newScrollHeight / Math.max(1, prevScrollHeight)) - mouseY;
 
 statusEl.textContent = Math.round(zoom * 100) + '%';
 scheduleRerender();
@@ -260,10 +237,7 @@ applyZoom(zoom * factor, e.clientY);
 
 window.addEventListener('message', async (event) => {
 const msg = event.data;
-if (msg.type === 'error') {
-statusEl.textContent = 'Error: ' + msg.message;
-return;
-}
+if (msg.type === 'error') { statusEl.textContent = 'Error: ' + msg.message; return; }
 if (msg.type !== 'loadPdf' || !msg.base64) { return; }
 
 statusEl.textContent = 'Opening PDF...';
@@ -275,6 +249,8 @@ pdfDoc = await pdfjsLib.getDocument({ data }).promise;
 zoom = 1.0;
 renderedAtZoom = 1.0;
 pagesEl.style.zoom = '1';
+pagesEl.style.gap = '16px';
+pagesEl.innerHTML = '';
 await renderAllPages(zoom, 0);
 } catch (e) {
 statusEl.textContent = 'Failed: ' + (e instanceof Error ? e.message : String(e));

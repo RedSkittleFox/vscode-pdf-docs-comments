@@ -70,6 +70,24 @@ await webviewPanel.webview.postMessage({ type: 'error', message });
 return;
 }
 
+if (event?.type === 'openExternalUrl') {
+const rawUrl = typeof event.url === 'string' ? event.url.trim() : '';
+if (!rawUrl) {
+return;
+}
+
+try {
+const uri = vscode.Uri.parse(rawUrl);
+if (!['http', 'https', 'mailto'].includes(uri.scheme)) {
+return;
+}
+await vscode.env.openExternal(uri);
+} catch {
+// Ignore malformed URLs from PDF annotations.
+}
+return;
+}
+
 if (event?.type === 'openGoToPageDialog') {
 const currentPage = Number(event.currentPage ?? 1);
 const totalPages = Number(event.totalPages ?? 1);
@@ -198,6 +216,19 @@ user-select: text;
 .textLayer ::selection {
 background: rgba(0, 120, 215, 0.35);
 }
+.linkLayer {
+position: absolute;
+inset: 0;
+z-index: 3;
+pointer-events: none;
+}
+.linkLayer a {
+position: absolute;
+display: block;
+pointer-events: auto;
+cursor: pointer;
+text-decoration: none;
+}
 #status {
 position: fixed;
 bottom: 8px;
@@ -249,6 +280,7 @@ let pendingZoomAnchor = null;
 let previewScaleCurrent = 1.0;
 let previewScaleTarget = 1.0;
 let previewScaleRaf = null;
+let destinationPageIndexCache = new Map();
 let pagePromiseCache = new Map();
 let textContentCache = new Map();
 let estimatedPageWidthAtScale1 = 800;
@@ -266,6 +298,7 @@ cache.delete(firstKey);
 function clearRenderCaches() {
 pagePromiseCache = new Map();
 textContentCache = new Map();
+destinationPageIndexCache = new Map();
 pageSizeScale1ByIndex = new Map();
 renderedScaleByPage = new Map();
 }
@@ -362,6 +395,65 @@ const slotRect = slot.getBoundingClientRect();
 const nextScrollTop = viewportEl.scrollTop + (slotRect.top - viewportRect.top) - 8;
 viewportEl.scrollTop = Math.max(0, nextScrollTop);
 statusEl.textContent = 'Page ' + target + '/' + pdfDoc.numPages + ' - ' + Math.round(zoom * 100) + '%';
+scheduleVisibleRender();
+}
+
+async function goToPdfDestination(destRaw) {
+if (!pdfDoc || !destRaw) { return; }
+
+let dest = destRaw;
+if (typeof dest === 'string') {
+dest = await pdfDoc.getDestination(dest);
+}
+if (!Array.isArray(dest) || dest.length < 2) {
+return;
+}
+
+const pageRef = dest[0];
+let pageIndex = -1;
+if (typeof pageRef === 'number') {
+pageIndex = pageRef;
+} else {
+const key = JSON.stringify(pageRef);
+if (destinationPageIndexCache.has(key)) {
+pageIndex = destinationPageIndexCache.get(key);
+} else {
+pageIndex = await pdfDoc.getPageIndex(pageRef);
+destinationPageIndexCache.set(key, pageIndex);
+}
+}
+
+if (!Number.isFinite(pageIndex) || pageIndex < 0 || pageIndex >= pdfDoc.numPages) {
+return;
+}
+
+const pageNumber = pageIndex + 1;
+const destType = dest[1] && typeof dest[1] === 'object' ? dest[1].name : '';
+let topPdf = null;
+if (destType === 'XYZ' && typeof dest[3] === 'number') {
+topPdf = dest[3];
+} else if ((destType === 'FitH' || destType === 'FitBH') && typeof dest[2] === 'number') {
+topPdf = dest[2];
+}
+
+if (topPdf === null) {
+goToPage(pageNumber);
+return;
+}
+
+const slot = pagesEl.children[pageIndex];
+if (!slot) {
+goToPage(pageNumber);
+return;
+}
+
+const page = await getPageCached(pageNumber);
+const scale = renderedScaleByPage.get(pageIndex) ?? renderedAtZoom;
+const vp = page.getViewport({ scale: Math.max(0.0001, scale) });
+const point = vp.convertToViewportPoint(0, topPdf);
+const targetScrollTop = slot.offsetTop + point[1] - 8;
+viewportEl.scrollTop = Math.max(0, targetScrollTop);
+statusEl.textContent = 'Page ' + pageNumber + '/' + pdfDoc.numPages + ' - ' + Math.round(zoom * 100) + '%';
 scheduleVisibleRender();
 }
 
@@ -657,6 +749,8 @@ content.style.margin = '0 auto';
 const canvas = document.createElement('canvas');
 const textLayer = document.createElement('div');
 textLayer.className = 'textLayer';
+const linkLayer = document.createElement('div');
+linkLayer.className = 'linkLayer';
 
 const pageNumber = pageIndex + 1;
 const page = await getPageCached(pageNumber);
@@ -682,6 +776,8 @@ content.style.width = canvas.width + 'px';
 content.style.height = canvas.height + 'px';
 textLayer.style.width = canvas.width + 'px';
 textLayer.style.height = canvas.height + 'px';
+linkLayer.style.width = canvas.width + 'px';
+linkLayer.style.height = canvas.height + 'px';
 
 const ctx = canvas.getContext('2d');
 if (!ctx) { return null; }
@@ -708,10 +804,60 @@ buildFallbackTextLayer(textLayer, textContent, vp);
 console.warn('text layer disabled for page', pageNumber, textLayerError);
 }
 
+try {
+const annotations = await page.getAnnotations();
+for (const annotation of annotations) {
+if (!annotation || annotation.subtype !== 'Link' || !Array.isArray(annotation.rect)) { continue; }
+
+const rect = vp.convertToViewportRectangle(annotation.rect);
+if (!Array.isArray(rect) || rect.length < 4) { continue; }
+const left = Math.min(rect[0], rect[2]);
+const top = Math.min(rect[1], rect[3]);
+const width = Math.abs(rect[2] - rect[0]);
+const height = Math.abs(rect[3] - rect[1]);
+if (width < 1 || height < 1) { continue; }
+
+const linkEl = document.createElement('a');
+linkEl.href = '#';
+linkEl.style.left = left + 'px';
+linkEl.style.top = top + 'px';
+linkEl.style.width = width + 'px';
+linkEl.style.height = height + 'px';
+
+const externalUrl = typeof annotation.url === 'string'
+? annotation.url
+: (typeof annotation.unsafeUrl === 'string' ? annotation.unsafeUrl : null);
+if (externalUrl) {
+linkEl.title = externalUrl;
+linkEl.addEventListener('click', (event) => {
+event.preventDefault();
+vscode.postMessage({ type: 'openExternalUrl', url: externalUrl });
+});
+} else if (annotation.dest) {
+linkEl.addEventListener('click', (event) => {
+event.preventDefault();
+void goToPdfDestination(annotation.dest);
+});
+} else {
+continue;
+}
+
+linkLayer.appendChild(linkEl);
+}
+} catch (annotationError) {
+console.warn('link annotations disabled for page', pageNumber, annotationError);
+}
+
 if (gen !== renderGeneration) { return null; }
 
-if (textLayer.childNodes.length > 0) {
+if (textLayer.childNodes.length > 0 || linkLayer.childNodes.length > 0) {
+if (textLayer.childNodes.length > 0 && linkLayer.childNodes.length > 0) {
+content.replaceChildren(canvas, textLayer, linkLayer);
+} else if (textLayer.childNodes.length > 0) {
 content.replaceChildren(canvas, textLayer);
+} else {
+content.replaceChildren(canvas, linkLayer);
+}
 } else {
 content.replaceChildren(canvas);
 }

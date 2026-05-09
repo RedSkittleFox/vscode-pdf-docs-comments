@@ -247,6 +247,9 @@ let rerenderTimer = null;
 let visibleRenderTimer = null;
 let renderGeneration = 0;
 let pendingZoomAnchor = null;
+let previewScaleCurrent = 1.0;
+let previewScaleTarget = 1.0;
+let previewScaleRaf = null;
 let pagePromiseCache = new Map();
 let textContentCache = new Map();
 let estimatedPageWidthAtScale1 = 800;
@@ -507,6 +510,87 @@ slot.style.height = Math.max(1, Math.floor(baseHeight * scale)) + 'px';
 }
 }
 
+function syncPageContentScaleCompensation() {
+for (let i = 0; i < pagesEl.children.length; i++) {
+const slot = pagesEl.children[i];
+if (!slot) { continue; }
+
+const content = slot.firstElementChild;
+if (!content || !content.classList?.contains('page-content')) { continue; }
+
+const pageScale = renderedScaleByPage.get(i);
+if (!pageScale || Math.abs(pageScale - renderedAtZoom) < 0.0001) {
+content.style.transform = '';
+content.style.transformOrigin = '';
+continue;
+}
+
+const compensation = renderedAtZoom / Math.max(0.0001, pageScale);
+content.style.transformOrigin = 'top center';
+content.style.transform = 'scale(' + compensation + ')';
+}
+}
+
+function applyPreviewScaleTransform(scale) {
+if (Math.abs(scale - 1.0) < 0.0001) {
+pagesEl.style.transform = '';
+pagesEl.style.transformOrigin = '';
+return;
+}
+pagesEl.style.transformOrigin = 'top center';
+pagesEl.style.transform = 'scale(' + scale + ')';
+}
+
+function getPreviewCenterX() {
+return pagesEl.clientWidth / 2;
+}
+
+function baseToPreviewX(baseX, scale) {
+const cx = getPreviewCenterX();
+return baseX * scale + cx * (1 - scale);
+}
+
+function previewToBaseX(previewX, scale) {
+const cx = getPreviewCenterX();
+return (previewX - cx * (1 - scale)) / Math.max(0.0001, scale);
+}
+
+function syncPreviewScrollToAnchor() {
+if (!pendingZoomAnchor) { return; }
+const scale = Math.max(0.0001, previewScaleCurrent);
+const left = baseToPreviewX(pendingZoomAnchor.docBaseX, scale) - pendingZoomAnchor.mouseX;
+const top = pendingZoomAnchor.docBaseY * scale - pendingZoomAnchor.mouseY;
+viewportEl.scrollLeft = Math.max(0, left);
+viewportEl.scrollTop = Math.max(0, top);
+}
+
+function animatePreviewScale() {
+if (previewScaleRaf !== null) { return; }
+
+const tick = () => {
+const delta = previewScaleTarget - previewScaleCurrent;
+if (Math.abs(delta) < 0.001) {
+previewScaleCurrent = previewScaleTarget;
+applyPreviewScaleTransform(previewScaleCurrent);
+syncPreviewScrollToAnchor();
+previewScaleRaf = null;
+return;
+}
+
+previewScaleCurrent += delta * 0.28;
+applyPreviewScaleTransform(previewScaleCurrent);
+syncPreviewScrollToAnchor();
+previewScaleRaf = requestAnimationFrame(tick);
+};
+
+previewScaleRaf = requestAnimationFrame(tick);
+}
+
+function syncPreviewScaleTarget() {
+previewScaleTarget = zoom / Math.max(0.0001, renderedAtZoom);
+animatePreviewScale();
+}
+
 function getVisiblePageIndices() {
 const indices = [];
 const top = viewportEl.scrollTop;
@@ -649,6 +733,8 @@ slot.style.height = entry.slotHeight + 'px';
 slot.replaceChildren(entry.content);
 renderedScaleByPage.set(entry.pageIndex, targetZoom);
 }
+
+syncPageContentScaleCompensation();
 }
 
 async function renderVisiblePages(targetZoom, gen, transitionCommit = false) {
@@ -682,6 +768,7 @@ if (transitionCommit) {
 renderedAtZoom = targetZoom;
 pagesEl.style.gap = (16 * renderedAtZoom) + 'px';
 applyLayoutForScale(renderedAtZoom);
+syncPageContentScaleCompensation();
 }
 
 commitRenderedPages(renderedEntries, targetZoom);
@@ -695,6 +782,16 @@ async function rerenderAtCurrentZoom() {
 if (!pdfDoc) { return; }
 const targetZoom = zoom;
 const gen = ++renderGeneration;
+const fromRenderedZoom = renderedAtZoom;
+const anchorSnapshot = pendingZoomAnchor
+? {
+mouseX: pendingZoomAnchor.mouseX,
+mouseY: pendingZoomAnchor.mouseY,
+docBaseX: pendingZoomAnchor.docBaseX,
+docBaseY: pendingZoomAnchor.docBaseY,
+fromRenderedZoom: pendingZoomAnchor.fromRenderedZoom
+}
+: null;
 
 if (visibleRenderTimer) {
 clearTimeout(visibleRenderTimer);
@@ -711,12 +808,13 @@ const docY = viewportEl.scrollTop + anchorY;
 await renderVisiblePages(targetZoom, gen, true);
 if (gen !== renderGeneration) { return; }
 
-const anchor = pendingZoomAnchor;
-if (anchor) {
-const newScrollWidth = Math.max(1, viewportEl.scrollWidth);
-const newScrollHeight = Math.max(1, viewportEl.scrollHeight);
-viewportEl.scrollLeft = anchor.docX * (newScrollWidth / anchor.oldScrollWidth) - anchor.anchorX;
-viewportEl.scrollTop = anchor.docY * (newScrollHeight / anchor.oldScrollHeight) - anchor.anchorY;
+if (anchorSnapshot) {
+const committedFromZoom = Math.max(0.0001, anchorSnapshot.fromRenderedZoom ?? fromRenderedZoom);
+const commitRatio = targetZoom / committedFromZoom;
+const newDocX = anchorSnapshot.docBaseX * commitRatio;
+const newDocY = anchorSnapshot.docBaseY * commitRatio;
+viewportEl.scrollLeft = Math.max(0, newDocX - anchorSnapshot.mouseX);
+viewportEl.scrollTop = Math.max(0, newDocY - anchorSnapshot.mouseY);
 pendingZoomAnchor = null;
 } else {
 const newScrollWidth = Math.max(1, viewportEl.scrollWidth);
@@ -724,6 +822,14 @@ const newScrollHeight = Math.max(1, viewportEl.scrollHeight);
 viewportEl.scrollLeft = docX * (newScrollWidth / oldScrollWidth) - anchorX;
 viewportEl.scrollTop = docY * (newScrollHeight / oldScrollHeight) - anchorY;
 }
+
+if (previewScaleRaf !== null) {
+cancelAnimationFrame(previewScaleRaf);
+previewScaleRaf = null;
+}
+previewScaleCurrent = 1.0;
+previewScaleTarget = 1.0;
+applyPreviewScaleTransform(1.0);
 }
 
 function scheduleRerender() {
@@ -759,7 +865,7 @@ void renderVisiblePages(renderedAtZoom, gen);
 
 // --- zoom ---
 
-function applyZoom(newZoom, mouseClientY) {
+function applyZoom(newZoom, mouseClientX, mouseClientY) {
 const prev = zoom;
 zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, newZoom));
 if (zoom === prev) { return; }
@@ -772,19 +878,21 @@ visibleRenderTimer = null;
 }
 
 const rect = viewportEl.getBoundingClientRect();
-const mouseX = viewportEl.clientWidth / 2;
+const mouseX = mouseClientX !== undefined ? mouseClientX - rect.left : viewportEl.clientWidth / 2;
 const mouseY = mouseClientY !== undefined ? mouseClientY - rect.top : viewportEl.clientHeight / 2;
-const docX = viewportEl.scrollLeft + mouseX;
-const docY = viewportEl.scrollTop + mouseY;
+const currentScale = Math.max(0.0001, previewScaleCurrent);
+const previewX = viewportEl.scrollLeft + mouseX;
+const docBaseX = previewToBaseX(previewX, currentScale);
+const docBaseY = (viewportEl.scrollTop + mouseY) / currentScale;
 pendingZoomAnchor = {
-anchorX: mouseX,
-anchorY: mouseY,
-docX,
-docY,
-oldScrollWidth: Math.max(1, viewportEl.scrollWidth),
-oldScrollHeight: Math.max(1, viewportEl.scrollHeight)
+mouseX,
+mouseY,
+docBaseX,
+docBaseY,
+fromRenderedZoom: renderedAtZoom
 };
 
+syncPreviewScaleTarget();
 statusEl.textContent = Math.round(zoom * 100) + '%';
 scheduleRerender();
 }
@@ -793,7 +901,7 @@ viewportEl.addEventListener('wheel', (e) => {
 if (!e.ctrlKey) { return; }
 e.preventDefault();
 const factor = Math.exp(-e.deltaY * 0.002);
-applyZoom(zoom * factor, e.clientY);
+applyZoom(zoom * factor, e.clientX, e.clientY);
 }, { passive: false });
 
 viewportEl.addEventListener('scroll', () => {
@@ -835,6 +943,14 @@ pdfDoc = await pdfjsLib.getDocument({ data }).promise;
 clearRenderCaches();
 zoom = 1.0;
 renderedAtZoom = 1.0;
+pendingZoomAnchor = null;
+if (previewScaleRaf !== null) {
+cancelAnimationFrame(previewScaleRaf);
+previewScaleRaf = null;
+}
+previewScaleCurrent = 1.0;
+previewScaleTarget = 1.0;
+applyPreviewScaleTransform(1.0);
 renderGeneration += 1;
 pagesEl.style.gap = '16px';
 ensureSlots(pdfDoc.numPages);

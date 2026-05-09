@@ -86,7 +86,7 @@ display: flex;
 flex-direction: column;
 align-items: center;
 gap: 16px;
-transform-origin: top center;
+
 }
 canvas {
 display: block;
@@ -153,6 +153,7 @@ next.appendChild(canvas);
 pagesEl.replaceChildren(next);
 renderedAtZoom = targetZoom;
 pagesEl.style.zoom = '1';
+pagesEl.style.gap = (16 * targetZoom) + 'px';
 
 for (const { canvas, pageNum } of canvases) {
 if (gen !== renderGeneration) { return; }
